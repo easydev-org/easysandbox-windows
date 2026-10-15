@@ -60,7 +60,8 @@ COPY --chmod=755 vendor/run/ /run/
 ARG WORKER_VERSION=v0.0.1
 ARG EASYSTREAM_VERSION=v0.0.1
 ARG RELEASE_PROXY
-RUN set -eux; \
+ARG RELEASE_CACHEBUST
+RUN set -eux; echo "release cachebust ${RELEASE_CACHEBUST}"; \
     mkdir -p /opt/agent-worker; \
     for spec in \
       "agent-worker|https://github.com/easydev-org/easyworker/releases/download/${WORKER_VERSION}/agent-worker-windows-amd64.exe" \

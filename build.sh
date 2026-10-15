@@ -100,6 +100,7 @@ echo "  disk: $(du -h "${WORK}/disk/data.qcow2" | cut -f1) (EMBED_DISK=${EMBED_D
   --opt "build-arg:WORKER_VERSION=${WORKER_VERSION}" \
   --opt "build-arg:EASYSTREAM_VERSION=${EASYSTREAM_VERSION}" \
   --opt "build-arg:RELEASE_PROXY=${PROXY}" \
+  --opt "build-arg:RELEASE_CACHEBUST=$(date +%s)" \
   --opt "build-arg:GOLDEN_DISK_URL=$([ "${EMBED_DISK}" = "1" ] && echo "" || echo "${GOLDEN_DISK_URL}")" \
   --output "type=oci,dest=${WORK}/image.oci,compression=zstd" \
   --progress plain
