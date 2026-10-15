@@ -57,8 +57,8 @@ COPY --chmod=755 vendor/run/ /run/
 # Both binaries come from their GitHub releases (the source repos are the source
 # of truth; the sandbox image just ships what they published). No binaries are
 # staged into the build context any more.
-ARG WORKER_VERSION=v0.0.1
-ARG EASYSTREAM_VERSION=v0.0.1
+ARG WORKER_VERSION=v0.1.0
+ARG EASYSTREAM_VERSION=v0.1.0
 ARG RELEASE_PROXY
 ARG RELEASE_CACHEBUST
 RUN set -eux; echo "release cachebust ${RELEASE_CACHEBUST}"; \
