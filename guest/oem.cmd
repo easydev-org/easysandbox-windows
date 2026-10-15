@@ -87,33 +87,18 @@ curl.exe -s -m 60 -o "%NADL%" http://host.lan:8090/easystream 2>>"%LOG%"
 for %%A in ("%NADL%") do set "NASZ=%%~zA"
 if defined NASZ if !NASZ! GTR 10000 (
   move /y "%NADL%" "%NABIN%" >nul 2>&1
-  rem Start the daemon via a SCHEDULED TASK, not Start-Process.
-  rem Every worker job runs in a Windows JOB OBJECT and the sandbox kills that
-  rem job when the job finishes / the worker restarts. A Start-Process child
-  rem stays inside the job, so the daemon was killed seconds after it started
-  rem ("ran for a while, then vanished"). Task Scheduler launches it OUTSIDE
-  rem any job, so it survives.
-  rem The task action launches a *hidden* VBS runner (wscript //B + a 0 window
-  rem style), so the interactive session gets no visible console window on the
-  rem desktop — a bare `cmd /c` action (or `start`) flashes/shows one.
-  rem NOTE the `echo(` form: a plain `echo Set sh = ...)` inside a parenthesised
-  rem block makes cmd treat the `)` as the block terminator and truncate the
-  rem line. `echo(` + a `^)`-escaped closing paren writes it verbatim.
+  rem Start the daemon DETACHED in this (interactive) session.
   rem
-  rem The `Run` argument is `cmd /c "<exe>" serve > <log> 2>&1` wrapped in one
-  rem more pair of quotes. WScript.Shell.Run needs that outer quoting around the
-  rem whole /c string for cmd's nested quotes + redirection to survive (a plain
-  rem `cmd /c ""exe"" serve >> log` silently fails to start the process).
-  del "%WROOT%\daemon.vbs" >nul 2>&1
-  echo(Set sh = CreateObject("WScript.Shell"^)> "%WROOT%\daemon.vbs"
-  echo(sh.Run "cmd /c """"%NABIN%"" serve > ""%WS%\easystream.log"" 2>&1""", 0, False>> "%WROOT%\daemon.vbs"
-  rem ALWAYS (re)create the task (the disk is persistent, so an older task may
-  rem linger). The `/tr` value MUST be fully quoted as one argument, otherwise
-  rem schtasks parses the space in `wscript.exe //B ...` as the start-time
-  rem argument and fails ("Access is denied").
-  schtasks /create /tn Easystream /tr "wscript.exe //B C:\Users\Docker\daemon.vbs" /sc onlogon /ru Docker /rp admin /rl HIGHEST /it /f >>"%LOG%" 2>&1
-  rem (Re)start it (unconditionally, now that :48079 is free).
-  schtasks /run /tn Easystream >>"%LOG%" 2>&1
+  rem We used to register a Scheduled Task for this, but oem.cmd runs as the
+  rem plain interactive token, so `schtasks /create /rl HIGHEST` failed with
+  rem "Access is denied" and the daemon never started. A plain `start /b`
+  rem launches it in the session that bootstrap.vbs already owns (High-IL,
+  rem outside any worker job object) and it survives — verified: the daemon
+  rem serves :48078/:48079 for the life of the VM.
+  rem
+  rem `start /b` = no new console window (nothing flashes on the desktop);
+  rem the VBS wrapper we used before is no longer needed.
+  start "" /b "%NABIN%" serve > "%WS%\easystream.log" 2>&1
   powershell -NoProfile -Command "Start-Sleep -Seconds 3" >>"%LOG%" 2>&1
 ) else (
   del "%NADL%" >nul 2>&1

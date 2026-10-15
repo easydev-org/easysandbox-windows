@@ -49,16 +49,26 @@ COPY disk-support/windows.ver  /storage/windows.ver
 # Boot scripts (vendor/run already includes the assets/ subdirectory).
 COPY --chmod=755 vendor/run/ /run/
 
-# --- agent-worker boot-fetch ----------------------------------------------
-# The guest launcher downloads the worker on every boot (nginx :8090 /worker):
-# a worker upgrade is an image change, never a golden rebake. There is NO disk
-# fallback — the container always serves it.
-# NOTE: xa11y is NOT used anymore (a11y/input/capture are served by the
-# easystream daemon over HTTP/est).
-COPY --chmod=755 agent-worker-windows.exe /opt/agent-worker/agent-worker
-# easystream (Rust): the guest boot-fetches it, so an upgrade is an image
-# change, never a golden rebake.
-COPY --chmod=755 easystream-windows.exe /opt/agent-worker/easystream
+# --- agent-worker + easystream (both boot-fetched by the guest) ------------
+# The guest launcher downloads both on every boot (nginx :8090 /worker and
+# /easystream): an upgrade is an image change, never a golden rebake. There is
+# NO disk fallback — the container always serves them.
+#
+# Both binaries come from their GitHub releases (the source repos are the source
+# of truth; the sandbox image just ships what they published). No binaries are
+# staged into the build context any more.
+ARG WORKER_VERSION=v0.0.1
+ARG EASYSTREAM_VERSION=v0.0.1
+ARG RELEASE_PROXY
+RUN set -eux; \
+    mkdir -p /opt/agent-worker; \
+    for spec in \
+      "agent-worker|https://github.com/easydev-org/easyworker/releases/download/${WORKER_VERSION}/agent-worker-windows-amd64.exe" \
+      "easystream|https://github.com/easydev-org/easystream-windows/releases/download/${EASYSTREAM_VERSION}/easystream-windows-amd64.exe" ; do \
+      name="${spec%%|*}"; url="${spec#*|}"; \
+      curl -fsSL ${RELEASE_PROXY:+-x "${RELEASE_PROXY}"} -o "/opt/agent-worker/${name}" "${url}"; \
+    done; \
+    chmod 755 /opt/agent-worker/agent-worker /opt/agent-worker/easystream
 # The real launch logic. The on-disk loader (bootstrap.vbs, the ONLY file on the
 # golden disk) fetches this every boot, so ALL launch behaviour is an image
 # change (no golden-disk rebake).
@@ -71,9 +81,11 @@ COPY --chmod=755 start.sh      /run/start.sh
 # no-op unless GOLDEN_DISK_URL is set.
 COPY --chmod=755 golden-disk.sh /run/golden-disk.sh
 
-# Pin the virtio-vga mode. Without this the Windows driver picks its own
-# default (1280x800), which disagrees with the Linux (Xvfb) and macOS
-# (OpenCore/OVMF) sandboxes that are set to 1920x1080.
+# Display mode: 1024x768, matching the macOS/Linux/Android sandboxes.
+#
+# The OLD `-global virtio-vga.xres/yres` was silently IGNORED (QEMU warned
+# "invalid class name" and the guest came up at 640x480): xres/yres are DEVICE
+# properties, not -global ones. Pass them on the device instead.
 ENV VERSION=win11 \
     EDITION=pro \
     CPU_CORES=8 \
@@ -84,17 +96,21 @@ ENV VERSION=win11 \
     SAMBA=N \
     USER_PORTS=48080 \
     DISK_FILE=/storage/data.qcow2 \
-    ARGUMENTS="-global virtio-vga.xres=1920 -global virtio-vga.yres=1080"
+    ARGUMENTS="-device virtio-vga,xres=1024,yres=768"
 
 # Default golden disk (disk-less images): baked into ENV so the VM boots even
 # when no GOLDEN_DISK_URL is injected; a pod env still overrides it.
 ARG GOLDEN_DISK_URL=""
 ENV GOLDEN_DISK_URL=${GOLDEN_DISK_URL}
 
-# The worker (in the guest) streams the screen itself as H.264 (/stream/ws);
-# qemu still exports a VNC display (dockur `DISPLAY=web`) but we do not use it.
-ENV DISPLAY=web \
-    WEB_PORT=6080
+# The worker (in the guest) streams the screen itself as H.264 (/stream/ws), so
+# the QEMU VNC display and the noVNC web client are dead weight: no VNC, no
+# noVNC assets, no extra port. (DISPLAY=none keeps the qemu command free of any
+# -display/-vnc flags.)
+ENV DISPLAY=none
+
+# noVNC is only used by the VNC display we just turned off. Drop its assets.
+RUN rm -rf /usr/share/novnc /usr/share/novnc-* 2>/dev/null || true
 
 VOLUME /storage
 EXPOSE 3389 22 48080 8090
