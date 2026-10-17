@@ -159,21 +159,27 @@ configureAudio() {
 
   AUDIO_OPTS=""
 
-  disabled "${WEB:-}" && return 0
   enabled "${AUDIO:-N}" || return 0
 
-  if [ -z "${AUDIO_FIFO:-}" ] || [ ! -p "$AUDIO_FIFO" ]; then
-
-    disableAudio
-
-    warn "Audio support failed to initialize, ignoring AUDIO=Y."
-    return 0
+  # AUDIO=Y is NOT tied to the web relay any more. The relay exists to push the
+  # guest's audio to noVNC, but the guest ALSO needs a sound device for its own
+  # reasons: the easystream daemon captures system playback with WASAPI loopback,
+  # and loopback needs a render endpoint. With no device there is no endpoint and
+  # the daemon advertises hasAudio=0 (see easystream EST.md).
+  #
+  # So: always add the device when AUDIO=Y; use the FIFO relay only when the web
+  # UI is on (that is what consumes it).
+  if disabled "${WEB:-}" || [ -z "${AUDIO_FIFO:-}" ] || [ ! -p "${AUDIO_FIFO:-}" ]; then
+    AUDIODEV_BACKEND="none"
+    warn "audio device enabled without the noVNC relay (WEB off): using -audiodev none"
+  else
+    AUDIODEV_BACKEND="wav,path=$AUDIO_FIFO"
   fi
 
   local sound="$SOUND"
   local model="${sound%%,*}"
 
-  AUDIO_OPTS+=" -audiodev wav,id=snd,path=$AUDIO_FIFO,out.frequency=48000,out.channels=2,out.format=s16"
+  AUDIO_OPTS+=" -audiodev ${AUDIODEV_BACKEND},id=snd,out.frequency=48000,out.channels=2,out.format=s16"
 
   # A USB audio device needs a compatible controller.
   if [[ "$model" == usb-* ]]; then

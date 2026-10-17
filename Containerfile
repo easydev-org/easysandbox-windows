@@ -95,6 +95,7 @@ ENV VERSION=win11 \
     DISK_FMT=qcow2 \
     MANUAL=N \
     SAMBA=N \
+    AUDIO=Y \
     USER_PORTS=48080 \
     DISK_FILE=/storage/data.qcow2 \
     ARGUMENTS="-device virtio-vga,xres=1024,yres=768"
