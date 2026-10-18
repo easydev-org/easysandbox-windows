@@ -30,7 +30,8 @@ RAM_SIZE="${RAM_SIZE:-32768M}"
 CPU_CORES="${CPU_CORES:-8}"
 DISK_SIZE="${DISK_SIZE:-128G}"
 MAC="${MAC:-}"
-MTU="${MTU:-1450}"
+MTU="${MTU:-}"            # empty = inherit the node's uplink MTU (see detect_mtu)
+UPLINK_DEV="${UPLINK_DEV:-eth0}"   # the pod's NIC; the guest's traffic NATs out here
 
 BRIDGE="${BRIDGE:-docker}"
 TAP="${TAP:-qemu}"
@@ -149,6 +150,61 @@ setup_network() {
     || iptables -t filter -A FORWARD -d "$GUEST_IP/32" ! -i "$BRIDGE" -o "$BRIDGE" -j ACCEPT
 }
 
+# ── host detection ─────────────────────────────────────────────────────────
+# The vendored scripts probed the host so the sandbox worked on ANY node
+# (Intel or AMD, apicv or not, a small pod or a big one). Keep that: never
+# hard-code what the host reports, or the image only runs on the node it was
+# built against.
+host_cpu_flags() {
+  local vendor vmx model flags
+  vendor=$(awk -F': *' '/^vendor_id/{print $2; exit}' /proc/cpuinfo | tr -d ' ')
+  vmx=$(sed -ne '/^vmx flags/s/^.*: //p' /proc/cpuinfo)
+  model=$(awk -F': *' '/^model name/{print $2; exit}' /proc/cpuinfo | sed 's/^ *//')
+
+  flags="host,kvm=on,l3-cache=on"
+  enabled "${VM:-Y}" && flags+=",+hypervisor"
+  # Host passthrough is intentionally non-migratable (full local feature set).
+  flags+=",migratable=no"
+
+  if [ "$vendor" = "GenuineIntel" ]; then
+    flags+=",-vmx"                                   # nested virt off by default
+    grep -qw tsc_scaling <<< "$vmx" && flags+=",+invtsc"
+  else
+    # AMD: invtsc only when the host advertises tsc_scale.
+    grep -m1 '^flags' /proc/cpuinfo | grep -qw tsc_scale && flags+=",+invtsc"
+  fi
+
+  # Hyper-V enlightenments: passthrough, then drop what this CPU cannot
+  # accelerate (an unsupported one makes Windows fail to boot).
+  local hv="hv_passthrough"
+  if [ "$vendor" = "GenuineIntel" ]; then
+    grep -qw apicv <<< "$vmx" || hv+=",-hv-apicv,-hv-evmcs"
+    case "$model" in
+      "Intel Atom "*|"Intel Celeron "*|"Intel Pentium "*) hv+=",-hv-evmcs" ;;
+    esac
+  else
+    grep -m1 '^flags' /proc/cpuinfo | grep -qw avic || hv+=",-hv-avic"
+    hv+=",-hv-evmcs"
+    # Windows guests on AMD KVM need arch_capabilities off.
+    flags+=",arch_capabilities=off"
+  fi
+  printf '%s,%s' "$flags" "$hv"
+}
+
+# MTU: propagate the node's MTU (a smaller-than-standard one must reach the
+# guest, or its TCP stalls). Jumbo frames are only used if the user asked.
+detect_mtu() {
+  local dev_mtu=""
+  [ -r "/sys/class/net/$UPLINK_DEV/mtu" ] && dev_mtu=$(< "/sys/class/net/$UPLINK_DEV/mtu")
+  if [ -z "${MTU:-}" ]; then
+    MTU="${dev_mtu:-0}"
+  elif [ "$MTU" -gt 1500 ] 2>/dev/null; then
+    MTU=1500
+  fi
+  [ "$MTU" = "0" ] && MTU=1500
+  GUEST_MTU="$MTU"
+}
+
 # ── 3. audio: FIFO + relay (the guest captures via WASAPI loopback) ─────────
 # QEMU writes the guest's audio to a FIFO; audio.py relays it to a socket that
 # websocketd exposes (audio-ws.sock) — the same relay the upstream used.
@@ -232,7 +288,9 @@ build_qemu_args() {
   ARGS+=" -machine type=q35,smm=off,graphics=off,vmport=off,dump-guest-core=off,hpet=off,accel=kvm"
   ARGS+=" -enable-kvm"
   ARGS+=" -global kvm-pit.lost_tick_policy=discard"
-  ARGS+=" -cpu host,kvm=on,l3-cache=on,+hypervisor,migratable=no,-vmx,+invtsc,hv_passthrough"
+  # CPU is composed from the HOST's vendor/features (Intel/AMD, apicv, avic,
+  # tsc_scaling) so the image runs on any node — see host_cpu_flags().
+  ARGS+=" -cpu $(host_cpu_flags)"
   ARGS+=" -smp $CPU_CORES,sockets=1,dies=1,cores=$CPU_CORES,threads=1"
   ARGS+=" -m ${ram_mb}M"
   ARGS+=" -name $APP,process=$PROCESS"
@@ -246,6 +304,8 @@ build_qemu_args() {
   ARGS+=" -device usb-tablet"
   ARGS+=" -netdev tap,id=hostnet0,ifname=$TAP,script=no,downscript=no"
   ARGS+=" -device virtio-net-pci,id=net0,netdev=hostnet0,romfile=,mac=$MAC,host_mtu=$MTU"
+  # `nocow=on` (COW-filesystem hint) is a `qemu-img create/convert` option, NOT
+  # a -drive one; golden-disk.sh owns disk creation, so nothing goes here.
   ARGS+=" -drive file=$DISK_FILE,id=data3,format=qcow2,cache=none,aio=native,discard=unmap,detect-zeroes=on,if=none"
   ARGS+=" -device virtio-scsi-pci,id=data3,bus=pcie.0,addr=0xa,iothread=io2,hotplug=off"
   ARGS+=" -device scsi-hd,drive=data3,bus=data3.0,channel=0,scsi-id=0,lun=0,rotation_rate=1,bootindex=3"
@@ -269,6 +329,11 @@ build_qemu_args() {
 }
 
 # ── run ────────────────────────────────────────────────────────────────────
+# Clamp CPU_CORES to what the node actually has (a pod can be limited to fewer
+# cores than the image asks for).
+_ncores=$(grep -c '^processor' /proc/cpuinfo)
+[ "$CPU_CORES" -gt "$_ncores" ] 2>/dev/null && { warn "CPU_CORES $CPU_CORES exceeds the $_ncores logical cores available; using $_ncores."; CPU_CORES="$_ncores"; }
+detect_mtu
 setup_network
 setup_audio
 prepare_firmware
