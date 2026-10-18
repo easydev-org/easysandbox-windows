@@ -3,3 +3,6 @@
 # Everything else the image ships IS tracked (vendor/run, disk-support, guest).
 disk/data.qcow2
 */disk/data.qcow2
+
+# local build staging (disk + support), not tracked
+/base/

@@ -45,9 +45,12 @@ COPY disk-support/windows.boot /storage/windows.boot
 COPY disk-support/windows.mac  /storage/windows.mac
 COPY disk-support/windows.ver  /storage/windows.ver
 
-# --- vendored Windows runtime ---------------------------------------------
-# Boot scripts (vendor/run already includes the assets/ subdirectory).
+# --- sandbox runtime -------------------------------------------------------
+# The whole boot path is ONE script (sandbox.sh): network + audio + firmware +
+# nginx + QEMU. vendor/run now holds only the two helpers it calls:
+# audio.py (the FIFO->socket relay) and socket.sh (the status websocket).
 COPY --chmod=755 vendor/run/ /run/
+COPY --chmod=755 sandbox.sh    /run/entry.sh
 
 # --- agent-worker + easystream (both boot-fetched by the guest) ------------
 # The guest launcher downloads both on every boot (nginx :8090 /worker and
@@ -70,8 +73,8 @@ RUN set -eux; echo "release cachebust ${RELEASE_CACHEBUST}"; \
       curl -fsSL ${RELEASE_PROXY:+-x "${RELEASE_PROXY}"} -o "/opt/agent-worker/${name}" "${url}"; \
     done; \
     chmod 755 /opt/agent-worker/agent-worker /opt/agent-worker/easystream
-# The real launch logic. The on-disk loader (bootstrap.vbs, the ONLY file on the
-# golden disk) fetches this every boot, so ALL launch behaviour is an image
+# The guest launch logic. The on-disk loader (bootstrap.vbs, the ONLY file on
+# the golden disk) fetches this every boot, so ALL launch behaviour is an image
 # change (no golden-disk rebake).
 COPY --chmod=644 guest/oem.cmd           /opt/agent-worker/oem.cmd
 
@@ -82,11 +85,11 @@ COPY --chmod=755 start.sh      /run/start.sh
 # no-op unless GOLDEN_DISK_URL is set.
 COPY --chmod=755 golden-disk.sh /run/golden-disk.sh
 
-# Display mode: 1024x768, matching the macOS/Linux/Android sandboxes.
-#
-# The OLD `-global virtio-vga.xres/yres` was silently IGNORED (QEMU warned
-# "invalid class name" and the guest came up at 640x480): xres/yres are DEVICE
-# properties, not -global ones. Pass them on the device instead.
+# Display + resources. sandbox.sh owns the FULL QEMU command line (including the
+# 1024x768 virtio-vga device, matching the macOS/Linux/Android sandboxes), so
+# ARGUMENTS is an empty EXTRA-args slot here — putting the VGA device in both
+# places gave QEMU the device twice. RAM_SIZE is advisory: sandbox.sh clamps it
+# to the pod's cgroup limit (this pod is 16 GiB, not the node's 1 TiB).
 ENV VERSION=win11 \
     EDITION=pro \
     CPU_CORES=8 \
@@ -97,7 +100,7 @@ ENV VERSION=win11 \
     SAMBA=N \
     USER_PORTS=48080 \
     DISK_FILE=/storage/data.qcow2 \
-    ARGUMENTS="-device virtio-vga,xres=1024,yres=768"
+    ARGUMENTS=""
 
 # Default golden disk (disk-less images): baked into ENV so the VM boots even
 # when no GOLDEN_DISK_URL is injected; a pod env still overrides it.
@@ -112,6 +115,12 @@ ENV DISPLAY=none
 
 # noVNC is only used by the VNC display we just turned off. Drop its assets.
 RUN rm -rf /usr/share/novnc /usr/share/novnc-* 2>/dev/null || true
+
+# The upstream dockur boot scripts (installer, samba, answer files, the version
+# catalogue, the VNC web client, the multi-machine matrices) are NOT shipped:
+# sandbox.sh only ever boots the pre-baked disk. /run/check.sh (the old
+# healthcheck) is gone too — the deployment defines no probe.
+RUN rm -rf /var/www /etc/samba /var/lib/samba 2>/dev/null || true
 
 VOLUME /storage
 EXPOSE 3389 22 48080 8090
