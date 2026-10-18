@@ -43,6 +43,13 @@ disableAudioControl() {
 
 enableAudioControl() {
 
+  # noVNC is not shipped in the disk-less image (DISPLAY=none: the guest streams
+  # its own screen), so there is no audio checkbox to patch. disableAudioControl
+  # already guards for this; without the same guard here, `sed` failed with
+  # "can't read /usr/share/novnc/vnc.html", which aborted startAudioRelay and
+  # made audio fall back to AUDIO=N — so the guest never got a sound device.
+  [ -f "$NOVNC_HTML" ] || return 0
+
   if ! sed -i '/id="noVNC_setting_audio"/ s/type="checkbox" disabled/type="checkbox"/' "$NOVNC_HTML"; then
     error "Failed to enable noVNC audio control!"
     return 1
@@ -137,8 +144,14 @@ startAudioRelay() {
 disableAudioControl || return 1
 enabled "$AUDIO" || return 0
 
+# WEB off does NOT disable the sound device any more. The relay (FIFO + the
+# noVNC control) needs the web UI, but the DEVICE is wanted on its own: the
+# easystream daemon captures system playback with WASAPI loopback, which needs a
+# render endpoint. config.sh now emits `-audiodev none` in that case.
+#
+# (Historically AUDIO was forced off here, so with DISPLAY=none the guest had no
+# sound device at all and the daemon reported hasAudio=0.)
 if disabled "${WEB:-}"; then
-  AUDIO="N"
   return 0
 fi
 
