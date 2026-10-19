@@ -144,17 +144,28 @@ the cluster uses at runtime.
 ## Building
 
 ```sh
-# stage (git-ignored): agent-toolchain/vm/windows/<variant>/data.qcow2
-#                      agent-toolchain/vm/windows/<variant>/disk-support/
-scripts/build-all.sh                        # dist/easyworker-windows-amd64.exe
-./agent-toolchain/vm/windows/build.sh base
-./agent-toolchain/vm/windows/build.sh devtools
+# stage (git-ignored): devtools/disk/data.qcow2 + devtools/disk-support/
+#   The guest disk is NOT committed; see "Getting the golden disk".
+./build.sh base        # disk-less base image
+./build.sh devtools    # the shipped variant
 
 # optional: shrink the disk layer
 qemu-img convert -f qcow2 -O qcow2 -o cluster_size=1M,lazy_refcounts=on \
   base/data.qcow2 base/defrag.qcow2
-./agent-toolchain/vm/windows/repack-disk.sh base/defrag.qcow2 base base
+./repack-disk.sh base/defrag.qcow2 base base
 ```
+
+`build.sh` takes `WORKER_VERSION` / `EASYSTREAM_VERSION` (both fetched from
+their GitHub releases at build time) and `TAG`.
+
+> **Pass overrides with `env`, not as a prefix.** `TAG=x bash build.sh …` lands
+> in a *shell function's* scope and is silently ignored; use
+> `env TAG=x bash build.sh …`.
+
+> **Tag names must be unique per build.** The in-cluster containerd does not
+> refresh a tag's digest, so pushing a new image under an existing tag leaves
+> pods running the OLD image. Give each build a new tag (`devtools-v5`, …), or
+> pin the digest.
 
 The guest disk is rebuilt by booting the previous image's disk (hostPath-backed
 so changes persist), running `guest/install-worker.cmd` inside it, then
