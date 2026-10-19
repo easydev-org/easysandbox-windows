@@ -13,17 +13,17 @@ rem High-IL: UAC is off, so jobs need no elevation).
 rem
 rem Responsibilities:
 rem   1. fetch the pod env (WORKER_TOKEN + SANDBOX_PROXY) from host.lan:8090/env
-rem   2. fetch the current agent-worker.exe  (host.lan:8090/worker)
+rem   2. fetch the current easyworker.exe  (host.lan:8090/worker)
 rem   3. fetch + start the easystream daemon (host.lan:8090/easystream)
-rem   4. run agent-worker.exe, supervised
+rem   4. run easyworker.exe, supervised
 rem =====================================================================
 setlocal enabledelayedexpansion
 
 set "WROOT=C:\Users\Docker"
-set "BIN=%WROOT%\agent-worker.exe"
-set "DL=%WROOT%\agent-worker.dl.exe"
+set "BIN=%WROOT%\easyworker.exe"
+set "DL=%WROOT%\easyworker.dl.exe"
 set "WS=%WROOT%\workspace"
-set "LOG=%WS%\agent-worker.log"
+set "LOG=%WS%\easyworker.log"
 
 if not exist "%WS%" mkdir "%WS%"
 

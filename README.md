@@ -1,6 +1,6 @@
-# agent-worker Windows image
+# easyworker Windows image
 
-The agent-worker Windows 11 sandbox: a self-owned runtime (the generic
+The easyworker Windows 11 sandbox: a self-owned runtime (the generic
 `qemux/qemu` Debian base + the vendored boot scripts in `vendor/`) wrapped
 around a pre-baked guest disk that already contains the worker, its launcher and
 the scheduled task. No upstream sandbox image is referenced.
@@ -17,9 +17,9 @@ the scheduled task. No upstream sandbox image is referenced.
 - `guest/` — the files baked *into the guest disk* (not part of the image build):
   - `worker-launch.cmd` — fetches `WORKER_TOKEN`/`SANDBOX_PROXY` from `host.lan:8090/env`,
     boot-fetches the worker from `host.lan:8090/worker` (falling back to the
-    disk copy), starts `agent-worker.exe` as the current user.
+    disk copy), starts `easyworker.exe` as the current user.
   - `ewelevate.cmd` — run a command as `NT AUTHORITY\SYSTEM` (escape hatch).
-  - `agent-worker-task.xml` — the `AgentWorker` task definition (Docker user,
+  - `easyworker-task.xml` — the `AgentWorker` task definition (Docker user,
     HIGHEST, interactive, at logon). The hostname/user inside must match the
     guest; `install-worker.cmd` registers an equivalent task without XML.
   - `install-worker.cmd` — (re)install the worker in a running guest.
@@ -146,7 +146,7 @@ the cluster uses at runtime.
 ```sh
 # stage (git-ignored): agent-toolchain/vm/windows/<variant>/data.qcow2
 #                      agent-toolchain/vm/windows/<variant>/disk-support/
-scripts/build-all.sh                        # dist/agent-worker-windows-amd64.exe
+scripts/build-all.sh                        # dist/easyworker-windows-amd64.exe
 ./agent-toolchain/vm/windows/build.sh base
 ./agent-toolchain/vm/windows/build.sh devtools
 

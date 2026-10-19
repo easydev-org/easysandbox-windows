@@ -70,5 +70,5 @@ If sz > 100 Then
   ' style keeps the whole tree invisible on the desktop.
   sh.Run "cmd /c start """" /b cmd /c """ & boot & """", 0, False
 Else
-  sh.Run "cmd /c echo bootstrap fetch FAILED >> C:\Users\Docker\workspace\agent-worker.log", 0, True
+  sh.Run "cmd /c echo bootstrap fetch FAILED >> C:\Users\Docker\workspace\easyworker.log", 0, True
 End If

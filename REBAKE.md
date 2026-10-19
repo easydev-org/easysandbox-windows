@@ -32,7 +32,7 @@ the launcher must NOT re-fetch it.
 |---|---|---|
 | `WORKER_TOKEN`, `SANDBOX_PROXY` | **dynamic** | fetched from `host.lan:8090/env` every boot (they change per sandbox) |
 | proxy (WinHTTP + WinINet / macOS system proxy) | **dynamic** | set from `SANDBOX_PROXY` every boot (value changes per deployment) |
-| **`agent-worker` binary** | **dynamic, NO disk fallback** | boot-fetched from `host.lan:8090/worker` every boot; a worker upgrade is an image change, never a rebake. If the fetch fails the worker does not start (retry, no fallback). |
+| **`easyworker` binary** | **dynamic, NO disk fallback** | boot-fetched from `host.lan:8090/worker` every boot; a worker upgrade is an image change, never a rebake. If the fetch fails the worker does not start (retry, no fallback). |
 | **`xa11y`** | **static** | baked into the golden disk (`C:\Users\Docker\bin\xa11y.exe` / `/usr/local/bin/xa11y`); the launcher only ensures it is on PATH |
 | firewall off (Windows) | **static** | baked registry state (`EnableFirewall=0`, all profiles) — the launcher does NOT re-apply |
 | TCC grants (macOS) | **static** | baked into the disk's TCC.db by `guest/bake-hardening.sh`; keyed by the STABLE paths, so they persist across boots and worker upgrades |
@@ -145,7 +145,7 @@ Notes:
 
 ```
 :: xa11y computer-use CLI is embedded at C:\Users\Docker\bin\xa11y.exe
-:: (copy the darwin/win binary from the image /opt/agent-worker/xa11y.exe)
+:: (copy the darwin/win binary from the image /opt/easyworker/xa11y.exe)
 
 :: repair machine PATH (dotnet/Git/MSVC/SDK/OpenSSH) + import vcvars INCLUDE/LIB
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\Docker\envfix.ps1
@@ -250,13 +250,13 @@ sudo shutdown -r now
 | **displayplacer 404** | worker NEVER starts; agent `last exit code = 127` | The artifact path for `displayplacer-darwin-amd64` 404s, so the launcher fetched a 33-byte JSON error body; `displayplacer list` then aborted the script under `set -e`+`pipefail`. **displayplacer was removed from the launcher** — do not reintroduce a hard failure there. |
 | **old launcher fetches `/token`** | worker `unauthenticated` (401) | The disk's launcher must fetch `http://host.lan:8090/env` (the container exposes `/env`, NOT `/token`). Refresh `worker-launch.sh` from the repo before baking. |
 | **`ws` owned by root** | worker `attempt to write a readonly database` | The launcher must `chown -R docker:staff ~/ws` (it does, in the daemon path). Don't create `ws/jobs.db` as root manually. |
-| **missing launchd units** | `launchctl` has no `com.agentworker.worker` | Run `guest/bake-guest.sh` (creates the LaunchDaemon + LaunchAgent + sudoers + autologin). |
+| **missing launchd units** | `launchctl` has no `com.easyworker.worker` | Run `guest/bake-guest.sh` (creates the LaunchDaemon + LaunchAgent + sudoers + autologin). |
 | **xa11y is a 0-byte/bogus file** | computer-use fails | Embed the real Mach-O at `/usr/local/bin/xa11y` (do NOT leave a symlink to a missing `~/xa11y`). |
 
 ## Verify
 
 ```
-launchctl list | grep agentworker      # com.agentworker.worker present
+launchctl list | grep agentworker      # com.easyworker.worker present
 lsof -iTCP:48080 -sTCP:LISTEN          # worker listening
 curl -s http://127.0.0.1:48080/healthz # ok
 ```

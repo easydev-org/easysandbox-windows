@@ -53,7 +53,7 @@ LOGO="${LOGO:-Y}"
 DEBUG="${DEBUG:-N}"
 SHUTDOWN="${SHUTDOWN:-Y}"
 
-WROOT=/opt/agent-worker
+WROOT=/opt/easyworker
 mkdir -p "$STORAGE" "$QEMU_DIR"
 
 log()  { printf '\033[1;34m❯\033[0m %s\n' "$*"; }

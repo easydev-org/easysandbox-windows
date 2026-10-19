@@ -1,4 +1,4 @@
-# agent-worker Windows sandbox — self-owned runtime, pre-baked disk, boot only.
+# easyworker Windows sandbox — self-owned runtime, pre-baked disk, boot only.
 #
 # No upstream sandbox image is referenced. The runtime is the generic qemux/qemu
 # Debian base plus a vendored copy of the Windows boot scripts (vendor/run,
@@ -52,7 +52,7 @@ COPY disk-support/windows.ver  /storage/windows.ver
 COPY --chmod=755 vendor/run/ /run/
 COPY --chmod=755 sandbox.sh    /run/entry.sh
 
-# --- agent-worker + easystream (both boot-fetched by the guest) ------------
+# --- easyworker + easystream (both boot-fetched by the guest) ------------
 # The guest launcher downloads both on every boot (nginx :8090 /worker and
 # /easystream): an upgrade is an image change, never a golden rebake. There is
 # NO disk fallback — the container always serves them.
@@ -65,18 +65,18 @@ ARG EASYSTREAM_VERSION=v0.1.0
 ARG RELEASE_PROXY
 ARG RELEASE_CACHEBUST
 RUN set -eux; echo "release cachebust ${RELEASE_CACHEBUST}"; \
-    mkdir -p /opt/agent-worker; \
+    mkdir -p /opt/easyworker; \
     for spec in \
-      "agent-worker|https://github.com/easydev-org/easyworker/releases/download/${WORKER_VERSION}/agent-worker-windows-amd64.exe" \
+      "easyworker|https://github.com/easydev-org/easyworker/releases/download/${WORKER_VERSION}/easyworker-windows-amd64.exe" \
       "easystream|https://github.com/easydev-org/easystream-windows/releases/download/${EASYSTREAM_VERSION}/easystream-windows-amd64.exe" ; do \
       name="${spec%%|*}"; url="${spec#*|}"; \
-      curl -fsSL ${RELEASE_PROXY:+-x "${RELEASE_PROXY}"} -o "/opt/agent-worker/${name}" "${url}"; \
+      curl -fsSL ${RELEASE_PROXY:+-x "${RELEASE_PROXY}"} -o "/opt/easyworker/${name}" "${url}"; \
     done; \
-    chmod 755 /opt/agent-worker/agent-worker /opt/agent-worker/easystream
+    chmod 755 /opt/easyworker/easyworker /opt/easyworker/easystream
 # The guest launch logic. The on-disk loader (bootstrap.vbs, the ONLY file on
 # the golden disk) fetches this every boot, so ALL launch behaviour is an image
 # change (no golden-disk rebake).
-COPY --chmod=644 guest/oem.cmd           /opt/agent-worker/oem.cmd
+COPY --chmod=644 guest/oem.cmd           /opt/easyworker/oem.cmd
 
 # --- token/worker bridge (no sidecar) -------------------------------------
 COPY --chmod=644 00-token.conf /etc/nginx/conf.d/00-token.conf

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shrink the agent-worker Windows golden-disk OCI layer.
+# Shrink the easyworker Windows golden-disk OCI layer.
 #
 # Same idea as images/macos/repack-disk.sh. The Windows images are dominated by
 # one layer: the pre-baked guest qcow2. Storing it defragmented to uncompressed
