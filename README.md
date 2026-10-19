@@ -113,6 +113,34 @@ Two gotchas found the hard way while rebaking (both handled by the script):
   base**; and a full rollout must rebuild the image **and** let the node
   re-pull it (a same-tag re-push may be served from the kubelet cache).
 
+## Getting the golden disk
+
+The multi-GB guest disk is **not** stored in this repo (see `.gitignore`). It is
+published on **ghcr.io as sharded OCI images** and fetched with `fetch-golden.sh`:
+
+```sh
+# -> /storage/data.qcow2, sha256-verified
+./fetch-golden.sh windows /storage/data.qcow2
+```
+
+Why sharded: no single GitHub store fits a 15 GiB disk —
+
+| store | limit | fits? |
+|---|---|---|
+| Git LFS | 2 GiB/file (Free/Pro), 5 GiB (Enterprise) | no |
+| release asset | < 2 GiB | no |
+| OCI layer | 10 GiB **and** a 10-minute upload timeout | no (15 GiB) |
+
+so the disk is split into <4 GiB parts and each part is one single-layer image:
+`ghcr.io/silvermelon233/golden-windows:win11-devtools3.00 .. .04`. The script
+pulls them anonymously, extracts each part from its layer, joins them, and
+verifies the whole-disk sha256
+(`22b93b597268efd6761f22b8e4057854396455ca24892e07f105b63a4ae9ed9e`).
+
+`GOLDEN_DISK_URL` in the image/ENV can also point at the artifact store
+(`.../artifacts/generic/golden-windows/11/data-devtools3.qcow2`), which is what
+the cluster uses at runtime.
+
 ## Building
 
 ```sh
