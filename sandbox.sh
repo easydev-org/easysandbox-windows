@@ -74,6 +74,12 @@ fi
 {
   printf 'WORKER_TOKEN=%s\n' "${WORKER_TOKEN:-}"
   printf 'SANDBOX_PROXY=%s\n' "${SANDBOX_PROXY:-${HTTP_PROXY:-}}"
+  # The guest launcher starts easystream with this as its CONTROL token, so a
+  # leaked port cannot drive the guest. It is the same secret as WORKER_TOKEN,
+  # and the worker presents it on est (Auth frame) / HTTP (?token=). VIEW stays
+  # open (no view token) so anyone may watch.
+  printf 'EAZYSTREAM_CONTROL_TOKEN=%s\n' "${EAZYSTREAM_CONTROL_TOKEN:-${WORKER_TOKEN:-}}"
+  printf 'EAZYSTREAM_VIEW_TOKEN=%s\n' "${EAZYSTREAM_VIEW_TOKEN:-}"
 } > "$QEMU_DIR/env"
 chmod 644 "$QEMU_DIR/env" 2>/dev/null || true
 
@@ -195,14 +201,15 @@ host_cpu_flags() {
 # guest, or its TCP stalls). Jumbo frames are only used if the user asked.
 detect_mtu() {
   local dev_mtu=""
-  [ -r "/sys/class/net/$UPLINK_DEV/mtu" ] && dev_mtu=$(< "/sys/class/net/$UPLINK_DEV/mtu")
+  if [ -r "/sys/class/net/$UPLINK_DEV/mtu" ]; then dev_mtu=$(< "/sys/class/net/$UPLINK_DEV/mtu"); fi
   if [ -z "${MTU:-}" ]; then
     MTU="${dev_mtu:-0}"
   elif [ "$MTU" -gt 1500 ] 2>/dev/null; then
     MTU=1500
   fi
-  [ "$MTU" = "0" ] && MTU=1500
+  if [ "$MTU" = "0" ]; then MTU=1500; fi
   GUEST_MTU="$MTU"
+  return 0
 }
 
 # ── 3. audio: FIFO + relay (the guest captures via WASAPI loopback) ─────────

@@ -38,10 +38,18 @@ set /a N+=1
 if !N! lss 10 (ping -n 2 127.0.0.1 >nul & goto try)
 :have
 set "WORKER_TOKEN="
+set "EAZYSTREAM_CONTROL_TOKEN="
+set "EAZYSTREAM_VIEW_TOKEN="
 for /f "usebackq tokens=1,* delims==" %%a in ("%PODENV%") do (
   if /i "%%a"=="WORKER_TOKEN" set "WORKER_TOKEN=%%b"
   if /i "%%a"=="SANDBOX_PROXY" set "SANDBOX_PROXY=%%b"
+  if /i "%%a"=="EAZYSTREAM_CONTROL_TOKEN" set "EAZYSTREAM_CONTROL_TOKEN=%%b"
+  if /i "%%a"=="EAZYSTREAM_VIEW_TOKEN" set "EAZYSTREAM_VIEW_TOKEN=%%b"
 )
+rem The daemon must be LOCKED: control needs the token (default to the worker's
+rem own token), view stays open. Without this it would run unauthenticated and
+rem any process that reached :48079/:48078 could drive the guest.
+if not defined EAZYSTREAM_CONTROL_TOKEN set "EAZYSTREAM_CONTROL_TOKEN=%WORKER_TOKEN%"
 if defined SANDBOX_PROXY (
   set "HTTP_PROXY=!SANDBOX_PROXY!"
   set "HTTPS_PROXY=!SANDBOX_PROXY!"
