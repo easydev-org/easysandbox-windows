@@ -12,8 +12,12 @@
 # windows binary COPYed here is the disk fallback.
 #
 # Expected layout (git-ignored, staged outside the repo):
-#   <variant>/disk/data.qcow2      the guest disk
 #   <variant>/disk-support/        windows.{base,boot,mac,rom,vars,ver}
+#
+# The guest disk is NOT staged here any more: the Containerfile pulls it from
+# its published image (`FROM ghcr.io/easydev-org/golden-disk-windows:base AS
+# golden` and reassembles the pieces there). Staging it locally meant keeping a
+# 14 GiB file in the tree and copying it, twice, for no benefit.
 #
 # Prerequisites: dist/easyworker-windows-amd64.exe (scripts/build-all.sh).
 set -euo pipefail
@@ -51,7 +55,6 @@ PROXY="${PROXY:-http://mihomo.develop.svc.cluster.local:7890}"
 NO_PROXY="${NO_PROXY:-localhost,127.0.0.1,.svc,.svc.cluster.local,.cluster.local,artifact.worker.svc.cluster.local,buildkitd.worker.svc.cluster.local,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
 no_proxy="${no_proxy:-$NO_PROXY}"
 export NO_PROXY no_proxy
-DISK="${DISK:-${DIR}/${VARIANT}/disk/data.qcow2}"
 SUPPORT="${SUPPORT:-${DIR}/${VARIANT}/disk-support}"
 # Both guest binaries come from GitHub releases (see the Containerfile), so the
 # build only needs the versions, not staged files.
@@ -70,13 +73,11 @@ BUILDCTL="${BUILDCTL:-$(command -v buildctl || true)}"
 for f in "${DIR}/Containerfile" "${DIR}/00-token.conf" "${DIR}/sandbox.sh" "${DIR}/golden-disk.sh"; do
   [ -e "$f" ] || { echo "missing $f" >&2; exit 1; }
 done
-[ -e "${DISK}" ] || { echo "missing disk ${DISK}: run fetch-golden.sh first" >&2; exit 1; }
 [ -d "${SUPPORT}" ] || { echo "missing support dir ${SUPPORT}" >&2; exit 1; }
 [ -n "${BUILDCTL}" ] || { echo "buildctl not found (set BUILDCTL)" >&2; exit 1; }
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
-mkdir -p "${WORK}/disk"
 cp "${DIR}/Containerfile" "${WORK}/Dockerfile"
 cp "${DIR}/00-token.conf" "${WORK}/"
 # The single boot script (replaces the vendored vendor/run/*.sh boot chain).
@@ -86,11 +87,10 @@ cp "${DIR}/sandbox.sh" "${WORK}/"
 cp -r "${DIR}/vendor" "${WORK}/vendor"
 cp -r "${DIR}/guest"  "${WORK}/guest"
 cp "${DIR}/golden-disk.sh" "${WORK}/"
-ln "${DISK}" "${WORK}/disk/data.qcow2" 2>/dev/null || cp "${DISK}" "${WORK}/disk/data.qcow2"
 cp -r "${SUPPORT}" "${WORK}/disk-support"
 
 echo "Building ${NAME}:${TAG} -> ${DEST} (buildkitd=${BUILDKIT})"
-echo "  disk: $(du -h "${WORK}/disk/data.qcow2" | cut -f1) (embedded)"
+echo "  disk: pulled from ${GOLDEN_DISK_IMAGE:-ghcr.io/easydev-org/golden-disk-windows:base}"
 "${BUILDCTL}" --addr "${BUILDKIT}" build \
   --frontend dockerfile.v0 \
   --local "context=${WORK}" \

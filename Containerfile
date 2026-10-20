@@ -11,6 +11,22 @@
 # (unattended-answer editing + ISO/WIM extraction), python3-pip + blinter, and
 # /var/drivers.txz. None of that is reachable on the boot path, so it is not
 # installed here. Shared folders are off (SAMBA=N).
+# The golden disk, pulled by BuildKit straight from its published image.
+#
+# The disk is 14 GiB, above what a registry accepts in one layer, so it is
+# published as a tag whose LAYERS are consecutive pieces of the qcow2 (15 of them
+# for Windows). This stage puts the pieces back together; it exists only during
+# the build and never reaches the final image.
+#
+# Doing it this way rather than downloading the pieces with a script means:
+#   * no second 14 GiB copy on the build host (the pieces plus the joined file
+#     would be ~28 GiB, and a CI runner has ~30 GiB free in total);
+#   * BuildKit caches the layers, so an unrelated change does not re-fetch 14 GiB;
+#   * retries and resume are BuildKit's problem, not ours.
+ARG GOLDEN_DISK_IMAGE=ghcr.io/easydev-org/golden-disk-windows:base
+FROM ${GOLDEN_DISK_IMAGE} AS golden
+RUN cat /data.part* > /data.qcow2
+
 ARG REGISTRY=docker.io/qemux
 FROM ${REGISTRY}/udfread:1.2.0 AS udfread
 FROM ${REGISTRY}/qemu:750
@@ -35,7 +51,8 @@ COPY --from=udfread /udfread /usr/bin/udfread
 # It lands in /opt/golden-disk, NOT /storage: /storage is where the writable
 # volume is mounted, so a copy there would be hidden by the mount. golden-disk.sh
 # uses this file as the qcow2 backing for the per-sandbox overlay.
-COPY disk/data.qcow2  /opt/golden-disk/data.qcow2
+# Reassembled from the published golden image in the `golden` stage above.
+COPY --from=golden /data.qcow2 /opt/golden-disk/data.qcow2
 # Guest identity + version marker (image-owned). The UEFI firmware itself is
 # NOT shipped: boot.sh generates OVMF_CODE_4M.fd / OVMF_VARS_4M.fd from the
 # base image's /usr/share/OVMF on first boot. A pre-seeded ROM was the wrong

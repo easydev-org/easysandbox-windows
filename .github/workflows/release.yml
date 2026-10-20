@@ -33,26 +33,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      # Pull the golden disk from ghcr.
-      #
-      # The package is ghcr.io/easydev-org/golden-disk-windows:base — owned by
-      # this organisation, which is exactly why the workflow's own GITHUB_TOKEN can
-      # read it. (It previously lived in a personal account, and a GITHUB_TOKEN can
-      # only reach packages of its own repository or organisation, so the pull
-      # failed with 403 Forbidden.)
-      - name: fetch the golden disk
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          mkdir -p disk
-          python3 scripts/ghcr_pull_disk.py windows disk/data.qcow2
-          ls -l disk/data.qcow2
-
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -60,6 +40,19 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The golden disk is NOT downloaded here.
+      #
+      # The Containerfile does `FROM ghcr.io/easydev-org/golden-disk-windows:base
+      # AS golden` and reassembles the qcow2 inside that stage, so BuildKit pulls
+      # the pieces with its own registry client: layers are cached, retries are
+      # its problem, and no second copy of 14 GiB ever lands on the runner. A
+      # script that downloaded the pieces first would need ~28 GiB of scratch on
+      # a machine with ~30 GiB free.
+      #
+      # GITHUB_TOKEN is what BuildKit authenticates with, which works because the
+      # package belongs to this organisation (it used to live in a personal
+      # account and returned 403 Forbidden).
 
       # The disk is 14 GiB; a normal runner has ~30 GB free. Prune everything
       # that is not needed so the build has room for the layer.
@@ -81,6 +74,8 @@ jobs:
             WORKER_VERSION=${{ env.WORKER_VERSION }}
             EASYSTREAM_VERSION=${{ env.EASYSTREAM_VERSION }}
             RELEASE_CACHEBUST=${{ github.run_id }}
+            # Overridable so a test build can point at a different disk.
+            GOLDEN_DISK_IMAGE=ghcr.io/easydev-org/golden-disk-windows:base
           # The disk layer is ~14 GiB; the default gha cache would blow up.
           cache-from: type=gha
           cache-to: type=gha,mode=min
