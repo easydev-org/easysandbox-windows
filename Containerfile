@@ -14,7 +14,7 @@
 #
 # ARG REGISTRY must be declared BEFORE the first FROM that uses it. buildx
 # validates this (UndefinedArgInFrom / InvalidDefaultArgInFrom), and putting it
-# after the golden stage made `FROM ${REGISTRY}/qemu:750` expand to "/qemu:750"
+# after the golden stage made `FROM ${REGISTRY}/qemu:7.50` expand to "/qemu:7.50"
 # and fail with "invalid reference format".
 ARG REGISTRY=docker.io/qemux
 
@@ -35,7 +35,7 @@ FROM ${GOLDEN_DISK_IMAGE} AS golden
 RUN cat /data.part* > /data.qcow2
 
 FROM ${REGISTRY}/udfread:1.2.0 AS udfread
-FROM ${REGISTRY}/qemu:750
+FROM ${REGISTRY}/qemu:7.50
 
 # No proxy settings: this file describes the image, not the build environment.
 # Egress configuration belongs to whoever runs the build.
