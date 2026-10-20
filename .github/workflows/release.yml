@@ -1,0 +1,82 @@
+name: image
+
+# Build the Windows sandbox image and push it to ghcr.
+#
+# The image EMBEDS the golden guest disk. That is the whole design: the disk is
+# immutable golden state, so it belongs in a layer rather than in an artifact
+# store that a pod must reach at start-up.
+#
+# The disk itself is not in this repository — it is a 14 GiB qcow2, published to
+# ghcr as golden-windows:base (8 layers). This job pulls it, concatenates the
+# layers, verifies the sha256 recorded in the manifest annotation, and hands the
+# file to the image build.
+
+on:
+  push:
+    tags: ["v*"]
+    branches: [main]
+    paths: ["Containerfile", "sandbox.sh", "golden-disk.sh", "guest/**", "00-token.conf", ".github/workflows/release.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/easydev-org/sandbox-windows
+  WORKER_VERSION: v0.3.8
+  EASYSTREAM_VERSION: v0.7.2
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Pull the golden disk from ghcr. GHCR_TOKEN is the workflow token: the
+      # packages live in the same org, and `packages: read` on GITHUB_TOKEN is
+      # enough for a workflow of that org.
+      - name: fetch the golden disk
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p disk
+          python3 scripts/ghcr_pull_disk.py windows disk/data.qcow2
+          ls -l disk/data.qcow2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The disk is 14 GiB; a normal runner has ~30 GB free. Prune everything
+      # that is not needed so the build has room for the layer.
+      - name: free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.ref_name }}
+            ${{ env.IMAGE }}:latest
+          build-args: |
+            WORKER_VERSION=${{ env.WORKER_VERSION }}
+            EASYSTREAM_VERSION=${{ env.EASYSTREAM_VERSION }}
+            RELEASE_CACHEBUST=${{ github.run_id }}
+          # The disk layer is ~14 GiB; the default gha cache would blow up.
+          cache-from: type=gha
+          cache-to: type=gha,mode=min

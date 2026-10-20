@@ -58,14 +58,19 @@ SUPPORT="${SUPPORT:-${DIR}/${VARIANT}/disk-support}"
 WORKER_VERSION="${WORKER_VERSION:-v0.1.0}"
 EASYSTREAM_VERSION="${EASYSTREAM_VERSION:-v0.1.0}"
 BUILDCTL="${BUILDCTL:-$(command -v buildctl || true)}"
-# EMBED_DISK=0 builds a disk-less image (the guest disk is fetched at run time
-# from the artifact golden base + per-sandbox overlay — see golden-disk.sh).
-EMBED_DISK="${EMBED_DISK:-1}"
+# The guest disk is ALWAYS embedded in the image.
+#
+# There used to be a disk-less mode that fetched the disk at run time from an
+# in-cluster artifact store. It worked, but it tied the image to that store, made
+# every pod start pay for a 14 GiB download, and — the reason it is gone — meant
+# the project could not be built or run anywhere the store was not reachable. The
+# disk is immutable golden state, so a multi-GB image layer is the honest
+# representation of it.
 
 for f in "${DIR}/Containerfile" "${DIR}/00-token.conf" "${DIR}/sandbox.sh" "${DIR}/golden-disk.sh"; do
   [ -e "$f" ] || { echo "missing $f" >&2; exit 1; }
 done
-[ "${EMBED_DISK}" = "1" ] && [ ! -e "${DISK}" ] && { echo "missing disk ${DISK} (or set EMBED_DISK=0)" >&2; exit 1; }
+[ -e "${DISK}" ] || { echo "missing disk ${DISK}: run fetch-golden.sh first" >&2; exit 1; }
 [ -d "${SUPPORT}" ] || { echo "missing support dir ${SUPPORT}" >&2; exit 1; }
 [ -n "${BUILDCTL}" ] || { echo "buildctl not found (set BUILDCTL)" >&2; exit 1; }
 
@@ -81,15 +86,11 @@ cp "${DIR}/sandbox.sh" "${WORK}/"
 cp -r "${DIR}/vendor" "${WORK}/vendor"
 cp -r "${DIR}/guest"  "${WORK}/guest"
 cp "${DIR}/golden-disk.sh" "${WORK}/"
-if [ "${EMBED_DISK}" = "1" ]; then
-  ln "${DISK}" "${WORK}/disk/data.qcow2" 2>/dev/null || cp "${DISK}" "${WORK}/disk/data.qcow2"
-else
-  : > "${WORK}/disk/data.qcow2"   # placeholder; Containerfile removes it when EMBED_DISK=0
-fi
+ln "${DISK}" "${WORK}/disk/data.qcow2" 2>/dev/null || cp "${DISK}" "${WORK}/disk/data.qcow2"
 cp -r "${SUPPORT}" "${WORK}/disk-support"
 
 echo "Building ${NAME}:${TAG} -> ${DEST} (buildkitd=${BUILDKIT})"
-echo "  disk: $(du -h "${WORK}/disk/data.qcow2" | cut -f1) (EMBED_DISK=${EMBED_DISK})"
+echo "  disk: $(du -h "${WORK}/disk/data.qcow2" | cut -f1) (embedded)"
 "${BUILDCTL}" --addr "${BUILDKIT}" build \
   --frontend dockerfile.v0 \
   --local "context=${WORK}" \
@@ -98,12 +99,10 @@ echo "  disk: $(du -h "${WORK}/disk/data.qcow2" | cut -f1) (EMBED_DISK=${EMBED_D
   --opt "build-arg:REGISTRY=${REGISTRY}${REGISTRY_NS:+/${REGISTRY_NS}}" \
   --opt "build-arg:HTTP_PROXY=${PROXY}" \
   --opt "build-arg:HTTPS_PROXY=${PROXY}" \
-  --opt "build-arg:EMBED_DISK=${EMBED_DISK}" \
   --opt "build-arg:WORKER_VERSION=${WORKER_VERSION}" \
   --opt "build-arg:EASYSTREAM_VERSION=${EASYSTREAM_VERSION}" \
   --opt "build-arg:RELEASE_PROXY=${PROXY}" \
   --opt "build-arg:RELEASE_CACHEBUST=$(date +%s)" \
-  --opt "build-arg:GOLDEN_DISK_URL=$([ "${EMBED_DISK}" = "1" ] && echo "" || echo "${GOLDEN_DISK_URL}")" \
   --output "type=image,name=${DEST},push=true,registry.insecure=true,compression=zstd" \
   --progress plain
 

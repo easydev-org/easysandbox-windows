@@ -11,14 +11,12 @@
 # (unattended-answer editing + ISO/WIM extraction), python3-pip + blinter, and
 # /var/drivers.txz. None of that is reachable on the boot path, so it is not
 # installed here. Shared folders are off (SAMBA=N).
-ARG REGISTRY=git.agent.svc.cluster.local/root
+ARG REGISTRY=docker.io/qemux
 FROM ${REGISTRY}/udfread:1.2.0 AS udfread
 FROM ${REGISTRY}/qemu:750
 
-# The build proxy must NOT be used for the in-cluster artifact mirror (it has no
-# route to it -> 404). This mirrors the desktop images' NO_PROXY.
-ENV NO_PROXY=localhost,127.0.0.1,.svc.cluster.local,.svc,artifact.worker.svc.cluster.local \
-    no_proxy=localhost,127.0.0.1,.svc.cluster.local,.svc,artifact.worker.svc.cluster.local
+# No proxy settings: this file describes the image, not the build environment.
+# Egress configuration belongs to whoever runs the build.
 
 # udfread: the Windows ISO reader used by the installer; kept because the boot
 # path's disk detection references it. (Copied via a named stage because
@@ -28,13 +26,16 @@ COPY --from=udfread /udfread /usr/bin/udfread
 # --- pre-baked guest disk + boot state -------------------------------------
 # The guest is already installed (data.qcow2 => DISK_FMT=qcow2), so no installer
 # runs. The UEFI identity/ROM/vars and the version marker travel alongside it.
-# EMBED_DISK=0 drops the (multi-GB) disk from the image; the disk is then
-# fetched at run time from the artifact-published golden base and a per-sandbox
-# overlay is created (see golden-disk.sh + GOLDEN_DISK_URL). Default 1 keeps the
-# historical embedded-disk image.
-ARG EMBED_DISK=1
-COPY disk/data.qcow2  /storage/data.qcow2.embedded
-RUN if [ "${EMBED_DISK}" = "1" ]; then mv /storage/data.qcow2.embedded /storage/data.qcow2; else rm -f /storage/data.qcow2.embedded; fi
+#
+# The disk is ALWAYS embedded. There used to be an EMBED_DISK=0 mode that fetched
+# it at run time from an in-cluster artifact store; that tied the image to one
+# environment and made every start pay a multi-GB download for immutable golden
+# state. A large layer is the honest cost of carrying the disk.
+#
+# It lands in /opt/golden-disk, NOT /storage: /storage is where the writable
+# volume is mounted, so a copy there would be hidden by the mount. golden-disk.sh
+# uses this file as the qcow2 backing for the per-sandbox overlay.
+COPY disk/data.qcow2  /opt/golden-disk/data.qcow2
 # Guest identity + version marker (image-owned). The UEFI firmware itself is
 # NOT shipped: boot.sh generates OVMF_CODE_4M.fd / OVMF_VARS_4M.fd from the
 # base image's /usr/share/OVMF on first boot. A pre-seeded ROM was the wrong
