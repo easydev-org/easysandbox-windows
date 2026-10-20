@@ -11,6 +11,13 @@
 # (unattended-answer editing + ISO/WIM extraction), python3-pip + blinter, and
 # /var/drivers.txz. None of that is reachable on the boot path, so it is not
 # installed here. Shared folders are off (SAMBA=N).
+#
+# ARG REGISTRY must be declared BEFORE the first FROM that uses it. buildx
+# validates this (UndefinedArgInFrom / InvalidDefaultArgInFrom), and putting it
+# after the golden stage made `FROM ${REGISTRY}/qemu:750` expand to "/qemu:750"
+# and fail with "invalid reference format".
+ARG REGISTRY=docker.io/qemux
+
 # The golden disk, pulled by BuildKit straight from its published image.
 #
 # The disk is 14 GiB, above what a registry accepts in one layer, so it is
@@ -27,7 +34,6 @@ ARG GOLDEN_DISK_IMAGE=ghcr.io/easydev-org/golden-disk-windows:base
 FROM ${GOLDEN_DISK_IMAGE} AS golden
 RUN cat /data.part* > /data.qcow2
 
-ARG REGISTRY=docker.io/qemux
 FROM ${REGISTRY}/udfread:1.2.0 AS udfread
 FROM ${REGISTRY}/qemu:750
 
