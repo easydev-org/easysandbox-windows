@@ -67,16 +67,39 @@ if defined SANDBOX_PROXY (
 
 rem --- 2. firewall: STATIC (disabled at bake time on the golden disk) -------
 
-rem --- 3. boot-fetch the worker binary (dynamic ONLY, no disk fallback) -----
->>"%LOG%" echo [%DATE% %TIME%] bootstrap: fetching worker from host.lan:8090/worker
+rem --- 3. fetch EVERY boot payload in one request ---------------------------
+rem The container packs easyworker.exe, easystream.exe and this script into one
+rem tar at /files (see start.sh). One fetch instead of three means one failure
+rem to report, and the container's file list is the single source of truth.
+rem
+rem Windows 10+ ships tar.exe (bsdtar), so no extra tooling is needed. Unpacked
+rem to %WROOT%\boot so nothing lands on top of a running binary: the real
+rem binaries are moved into place below.
+set "BOOTDIR=%WROOT%\boot"
+set "BBTAR=%WROOT%\files.tar"
+>>"%LOG%" echo [%DATE% %TIME%] bootstrap: fetching /files
+rmdir /s /q "%BOOTDIR%" >nul 2>&1
+mkdir "%BOOTDIR%" >nul 2>&1
+del "%BBTAR%" >nul 2>&1
+curl.exe -s -m 90 -o "%BBTAR%" http://host.lan:8090/files 2>>"%LOG%"
+for %%A in ("%BBTAR%") do set "BBSZ=%%~zA"
+if defined BBSZ if !BBSZ! GTR 1000 (
+  tar.exe -xf "%BBTAR%" -C "%BOOTDIR%" >>"%LOG%" 2>&1
+  >>"%LOG%" echo [%DATE% %TIME%] bootstrap: /files unpacked
+) else (
+  >>"%LOG%" echo [%DATE% %TIME%] bootstrap: /files fetch FAILED
+)
+
+rem --- 3b. install the worker binary (dynamic ONLY, no disk fallback) ------
+>>"%LOG%" echo [%DATE% %TIME%] bootstrap: installing worker from the payload
 del "%DL%" >nul 2>&1
-curl.exe -s -m 60 -o "%DL%" http://host.lan:8090/worker 2>>"%LOG%"
+copy /y "%BOOTDIR%\easyworker" "%DL%" >nul 2>&1
 for %%A in ("%DL%") do set "DLSZ=%%~zA"
 if defined DLSZ if !DLSZ! GTR 1000000 (
   move /y "%DL%" "%BIN%" >nul 2>&1 || set "BIN=%DL%"
 ) else (
   del "%DL%" >nul 2>&1
-  echo [%DATE% %TIME%] bootstrap: worker fetch FAILED (no fallback) >>"%LOG%"
+  echo [%DATE% %TIME%] bootstrap: worker install FAILED (no fallback) >>"%LOG%"
   rem Do NOT skip the rest: the easystream daemon must still be started, and
   rem the disk copy of the worker is used below. (Jumping to :run here meant a
   rem bootstrap that ran before the container's nginx was up never started the
@@ -89,9 +112,9 @@ rem The Go worker talks to easystream over est:// on 127.0.0.1:48079; the
 rem daemon owns capture/encode/input/UIA. Start it before the worker.
 set "NABIN=%WROOT%\easystream.exe"
 set "NADL=%WROOT%\easystream.dl.exe"
->>"%LOG%" echo [%DATE% %TIME%] bootstrap: fetching easystream from host.lan:8090/easystream
+>>"%LOG%" echo [%DATE% %TIME%] bootstrap: installing easystream from the payload
 del "%NADL%" >nul 2>&1
-curl.exe -s -m 60 -o "%NADL%" http://host.lan:8090/easystream 2>>"%LOG%"
+copy /y "%BOOTDIR%\easystream" "%NADL%" >nul 2>&1
 for %%A in ("%NADL%") do set "NASZ=%%~zA"
 if defined NASZ if !NASZ! GTR 10000 (
   move /y "%NADL%" "%NABIN%" >nul 2>&1

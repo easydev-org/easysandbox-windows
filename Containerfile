@@ -80,7 +80,6 @@ COPY --chmod=644 guest/oem.cmd           /opt/easyworker/oem.cmd
 
 # --- token/worker bridge (no sidecar) -------------------------------------
 COPY --chmod=644 00-token.conf /etc/nginx/conf.d/00-token.conf
-COPY --chmod=755 start.sh      /run/start.sh
 # Runtime disk materializer (fetches the artifact golden base + overlay); a
 # no-op unless GOLDEN_DISK_URL is set.
 COPY --chmod=755 golden-disk.sh /run/golden-disk.sh

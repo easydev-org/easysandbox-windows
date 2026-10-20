@@ -83,6 +83,40 @@ fi
 } > "$QEMU_DIR/env"
 chmod 644 "$QEMU_DIR/env" 2>/dev/null || true
 
+# --- pack every boot payload into ONE tar ----------------------------------
+# The guest used to fetch separate nginx locations (/worker, /easystream). Now it
+# downloads /files once and unpacks it, and this list is the single source of
+# truth for what a boot ships.
+#
+# Built at boot (not baked) so it can never disagree with the binaries in the
+# image. Flat layout — the guest untars into one directory:
+#   oem.cmd  easyworker  easystream
+#
+# NOTE: the guest loader (bootstrap.vbs on the golden disk) still fetches
+# /oem.cmd on its own — it can only fetch a script and run it, so oem.cmd cannot
+# come out of a tar that oem.cmd itself would have to fetch.
+#
+# The payload files keep their image names (no .exe): the Containerfile stages
+# them as /opt/easyworker/easyworker and /opt/easyworker/easystream, and oem.cmd
+# renames them when installing. Listing them with .exe here matched nothing and
+# produced a 10 KB tar that boot contained no binaries at all.
+BOOT_FILES="oem.cmd easyworker easystream"
+(
+  cd /opt/easyworker 2>/dev/null || exit 0
+  present=""
+  for f in $BOOT_FILES; do
+    [ -e "$f" ] && present="$present $f"
+  done
+  if [ -n "$present" ]; then
+    # shellcheck disable=SC2086
+    tar -cf "$QEMU_DIR/files.tar" $present
+  else
+    : > "$QEMU_DIR/files.tar"
+  fi
+)
+chmod 644 "$QEMU_DIR/files.tar" 2>/dev/null || true
+log "boot payload: $(stat -c%s "$QEMU_DIR/files.tar" 2>/dev/null || echo 0) bytes in files.tar"
+
 # Drop any firmware an EARLIER image left on the persistent PVC: the OVMF build
 # is image-owned (from /usr/share/OVMF), and a mismatched size makes QEMU refuse
 # to start ("combined size of system firmware exceeds 8388608 bytes").
