@@ -39,12 +39,16 @@ jobs:
       # tracked under devtools/disk-support/ (build.sh used to stage them; a plain
       # `docker build` has no such step, and the build failed with
       #   failed to calculate checksum: "/disk-support/windows.ver": not found).
-      # Link the variant's directory to the path the Containerfile expects.
+      #
+      # COPY, not a symlink: Docker does not follow symlinks inside the build
+      # context when resolving a COPY source, so `ln -s` produced the same
+      # "not found" error it was meant to fix.
       - name: stage disk-support
         run: |
           set -euo pipefail
           ls -l devtools/disk-support/
-          ln -sfn devtools/disk-support disk-support
+          cp -a devtools/disk-support disk-support
+          ls -l disk-support/
 
       - uses: docker/login-action@v3
         with:
