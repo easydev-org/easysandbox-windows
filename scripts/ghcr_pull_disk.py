@@ -29,13 +29,17 @@ import tarfile
 import tempfile
 import urllib.request
 
+# The packages now live in the organisation that owns this repository, so the
+# workflow's own GITHUB_TOKEN can read them. That token is a GitHub App token,
+# not a password: the /token endpoint expects it as x-access-token, and answers
+# with a registry JWT that the /v2 endpoints accept as Bearer.
 REG = "ghcr.io"
-OWNER = "silvermelon233"
-USER = "SilverMelon233"
+OWNER = "easydev-org"
+USER = "x-access-token"
 
 PLAN = {
-    "windows": ("golden-windows", "base"),
-    "macos": ("golden-macos", "base"),
+    "windows": ("golden-disk-windows", "base"),
+    "macos": ("golden-disk-macos", "base"),
 }
 
 ctx = ssl.create_default_context()

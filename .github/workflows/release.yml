@@ -37,9 +37,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Pull the golden disk from ghcr. GHCR_TOKEN is the workflow token: the
-      # packages live in the same org, and `packages: read` on GITHUB_TOKEN is
-      # enough for a workflow of that org.
+      # Pull the golden disk from ghcr.
+      #
+      # The package is ghcr.io/easydev-org/golden-disk-windows:base — owned by
+      # this organisation, which is exactly why the workflow's own GITHUB_TOKEN can
+      # read it. (It previously lived in a personal account, and a GITHUB_TOKEN can
+      # only reach packages of its own repository or organisation, so the pull
+      # failed with 403 Forbidden.)
       - name: fetch the golden disk
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
