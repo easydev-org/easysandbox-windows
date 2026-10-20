@@ -18,21 +18,18 @@
 # and fail with "invalid reference format".
 ARG REGISTRY=docker.io/qemux
 
-# The golden disk, pulled by BuildKit straight from its published image.
+# The golden disk is published as ONE image whose LAYERS are consecutive pieces
+# of the qcow2 (15 layers, 14 GiB) because it is far above what a registry accepts
+# in a single layer.
 #
-# The disk is 14 GiB, above what a registry accepts in one layer, so it is
-# published as a tag whose LAYERS are consecutive pieces of the qcow2 (15 of them
-# for Windows). This stage puts the pieces back together; it exists only during
-# the build and never reaches the final image.
-#
-# Doing it this way rather than downloading the pieces with a script means:
-#   * no second 14 GiB copy on the build host (the pieces plus the joined file
-#     would be ~28 GiB, and a CI runner has ~30 GiB free in total);
-#   * BuildKit caches the layers, so an unrelated change does not re-fetch 14 GiB;
-#   * retries and resume are BuildKit's problem, not ours.
+# Those layers are DATA ONLY — the image has no /bin/sh, so a `RUN cat /data.part*
+# > /data.qcow2` inside it fails with
+#   runc run failed: exec: "/bin/sh": stat /bin/sh: no such file or directory
+# The pieces are therefore copied into a stage that DOES have a shell, and joined
+# there. BuildKit still pulls and caches the 15 layers itself; only the result is
+# carried forward, so no second 14 GiB copy is ever made.
 ARG GOLDEN_DISK_IMAGE=ghcr.io/easydev-org/golden-disk-windows:base
 FROM ${GOLDEN_DISK_IMAGE} AS golden
-RUN cat /data.part* > /data.qcow2
 
 FROM ${REGISTRY}/udfread:1.2.0 AS udfread
 FROM ${REGISTRY}/qemu:7.50
@@ -57,8 +54,16 @@ COPY --from=udfread /udfread /usr/bin/udfread
 # It lands in /opt/golden-disk, NOT /storage: /storage is where the writable
 # volume is mounted, so a copy there would be hidden by the mount. golden-disk.sh
 # uses this file as the qcow2 backing for the per-sandbox overlay.
-# Reassembled from the published golden image in the `golden` stage above.
-COPY --from=golden /data.qcow2 /opt/golden-disk/data.qcow2
+# The pieces are copied in and JOINED HERE, not in the golden stage: that stage is
+# the disk image itself, which is pure data and has no /bin/sh to run `cat` with.
+#
+# Doing it in one RUN keeps the finished disk in a single layer (a COPY of the
+# pieces followed by a separate COPY of the result would store 14 GiB twice).
+COPY --from=golden /data.part* /tmp/golden/
+RUN mkdir -p /opt/golden-disk \
+    && cat /tmp/golden/data.part* > /opt/golden-disk/data.qcow2 \
+    && rm -rf /tmp/golden \
+    && ls -l /opt/golden-disk/data.qcow2
 # Guest identity + version marker (image-owned). The UEFI firmware itself is
 # NOT shipped: boot.sh generates OVMF_CODE_4M.fd / OVMF_VARS_4M.fd from the
 # base image's /usr/share/OVMF on first boot. A pre-seeded ROM was the wrong
