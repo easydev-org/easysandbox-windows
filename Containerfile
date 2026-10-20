@@ -54,16 +54,11 @@ COPY --from=udfread /udfread /usr/bin/udfread
 # It lands in /opt/golden-disk, NOT /storage: /storage is where the writable
 # volume is mounted, so a copy there would be hidden by the mount. golden-disk.sh
 # uses this file as the qcow2 backing for the per-sandbox overlay.
-# The pieces are copied in and JOINED HERE, not in the golden stage: that stage is
-# the disk image itself, which is pure data and has no /bin/sh to run `cat` with.
 #
-# Doing it in one RUN keeps the finished disk in a single layer (a COPY of the
-# pieces followed by a separate COPY of the result would store 14 GiB twice).
-COPY --from=golden /data.part* /tmp/golden/
-RUN mkdir -p /opt/golden-disk \
-    && cat /tmp/golden/data.part* > /opt/golden-disk/data.qcow2 \
-    && rm -rf /tmp/golden \
-    && ls -l /opt/golden-disk/data.qcow2
+# The disk itself is copied in at the VERY END of this file — see the note there.
+# Keeping it last means any earlier failure (a missing release asset, a bad apt
+# mirror, a wrong FROM tag) costs nothing, instead of pulling 14 GiB first and
+# then discovering the problem.
 # Guest identity + version marker (image-owned). The UEFI firmware itself is
 # NOT shipped: boot.sh generates OVMF_CODE_4M.fd / OVMF_VARS_4M.fd from the
 # base image's /usr/share/OVMF on first boot. A pre-seeded ROM was the wrong
@@ -143,6 +138,25 @@ ENV DISPLAY=none
 
 # noVNC is only used by the VNC display we just turned off. Drop its assets.
 RUN rm -rf /usr/share/novnc /usr/share/novnc-* 2>/dev/null || true
+
+# --- the golden disk, LAST ON PURPOSE ---------------------------------------
+#
+# Everything above is cheap and fails fast. This step pulls 14 GiB and produces
+# the largest layer in the image, so it runs only after the build has proven it
+# can succeed. Placed earlier, a missing release asset or a wrong base tag would
+# still cost a full 14 GiB download first — which is exactly what happened while
+# getting this workflow working.
+#
+# The pieces are copied here rather than joined in the `golden` stage because that
+# stage is the disk image itself: pure data, with no /bin/sh to run `cat` with.
+#
+# One RUN keeps the finished disk in a single layer; copying the pieces and then
+# copying the result separately would store 14 GiB twice.
+COPY --from=golden /data.part* /tmp/golden/
+RUN mkdir -p /opt/golden-disk \
+    && cat /tmp/golden/data.part* > /opt/golden-disk/data.qcow2 \
+    && rm -rf /tmp/golden \
+    && ls -l /opt/golden-disk/data.qcow2
 
 # The upstream dockur boot scripts (installer, samba, answer files, the version
 # catalogue, the VNC web client, the multi-machine matrices) are NOT shipped:

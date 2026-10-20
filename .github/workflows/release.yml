@@ -108,6 +108,14 @@ jobs:
             RELEASE_CACHEBUST=${{ github.run_id }}
             # Overridable so a test build can point at a different disk.
             GOLDEN_DISK_IMAGE=ghcr.io/easydev-org/golden-disk-windows:base
-          # The disk layer is ~14 GiB; the default gha cache would blow up.
+          # NO build cache.
+          #
+          # `cache-to: type=gha` uploaded 14 GiB back to the Actions cache after
+          # every build and bought nothing: the only expensive layer is the disk,
+          # which is immutable, so BuildKit's own registry cache already serves it
+          # from the base image without re-downloading. The upload doubled the
+          # wall time of an otherwise finished build.
+          #
+          # cache-from is kept so a repeat build can still reuse what the registry
+          # can give it.
           cache-from: type=gha
-          cache-to: type=gha,mode=min
