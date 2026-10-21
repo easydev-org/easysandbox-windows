@@ -1,0 +1,141 @@
+name: ci
+
+# Generated from release.yml by hand, keeping the build identical and
+# changing only what a pre-release check needs:
+#
+#   * build on main and on every pull request, not on a tag — a workflow
+#     cannot watch both (defining `branches` suppresses tag events and vice
+#     versa), so release.yml stays tag-only and this file covers the rest;
+#   * push under a throwaway pr-<n> / main-<sha> tag, so a pull request
+#     publishes nothing anyone depends on, while the registry handoff — where
+#     the large-layer failures actually happened — is still exercised;
+#   * no release job: a PR must not create a GitHub Release.
+
+name: image
+
+# Build the Windows sandbox image and push it to ghcr.
+#
+# The image EMBEDS the golden guest disk. That is the whole design: the disk is
+# immutable golden state, so it belongs in a layer rather than in an artifact
+# store that a pod must reach at start-up.
+#
+# The disk itself is not in this repository — it is a 14 GiB qcow2, published to
+# ghcr as golden-windows:base (8 layers). This job pulls it, concatenates the
+# layers, verifies the sha256 recorded in the manifest annotation, and hands the
+# file to the image build.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/easydev-org/sandbox-windows
+  # Versions are resolved from the latest release at build time, not pinned here.
+  # They were pinned, and the build failed with a 404 because the tag had moved on:
+  # the Containerfile downloads
+  #   .../releases/download/${EASYSTREAM_VERSION}/easystream-windows-amd64.exe
+  # and a hard-coded value silently rots the moment a new release is cut.
+  WORKER_REPO: easydev-org/easyworker
+  EASYSTREAM_REPO: easydev-org/easystream-windows
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: resolve release versions
+        id: ver
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          w=$(gh release view --repo "$WORKER_REPO" --json tagName -q .tagName)
+          e=$(gh release view --repo "$EASYSTREAM_REPO" --json tagName -q .tagName)
+          echo "worker=$w easystream=$e"
+          echo "worker=$w" >> "$GITHUB_OUTPUT"
+          echo "easystream=$e" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      # The Containerfile reads disk-support/, but the UEFI identity files are
+      # tracked under devtools/disk-support/ (build.sh used to stage them; a plain
+      # `docker build` has no such step, and the build failed with
+      #   failed to calculate checksum: "/disk-support/windows.ver": not found).
+      #
+      # COPY, not a symlink: Docker does not follow symlinks inside the build
+      # context when resolving a COPY source, so `ln -s` produced the same
+      # "not found" error it was meant to fix.
+      - name: stage disk-support
+        run: |
+          set -euo pipefail
+          ls -l devtools/disk-support/
+          cp -a devtools/disk-support disk-support
+          ls -l disk-support/
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The golden disk is NOT downloaded here.
+      #
+      # The Containerfile does `FROM ghcr.io/easydev-org/golden-disk-windows:base
+      # AS golden` and reassembles the qcow2 inside that stage, so BuildKit pulls
+      # the pieces with its own registry client: layers are cached, retries are
+      # its problem, and no second copy of 14 GiB ever lands on the runner. A
+      # script that downloaded the pieces first would need ~28 GiB of scratch on
+      # a machine with ~30 GiB free.
+      #
+      # GITHUB_TOKEN is what BuildKit authenticates with, which works because the
+      # package belongs to this organisation (it used to live in a personal
+      # account and returned 403 Forbidden).
+
+      # The disk is 14 GiB; a normal runner has ~30 GB free. Prune everything
+      # that is not needed so the build has room for the layer.
+      - name: free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - name: decide the tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "tag=pr-${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=main-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}
+          build-args: |
+            WORKER_VERSION=${{ steps.ver.outputs.worker }}
+            EASYSTREAM_VERSION=${{ steps.ver.outputs.easystream }}
+            RELEASE_CACHEBUST=${{ github.run_id }}
+            # Overridable so a test build can point at a different disk.
+            GOLDEN_DISK_IMAGE=ghcr.io/easydev-org/golden-disk-windows:base
+          # NO build cache.
+          #
+          # `cache-to: type=gha` uploaded 14 GiB back to the Actions cache after
+          # every build and bought nothing: the only expensive layer is the disk,
+          # which is immutable, so BuildKit's own registry cache already serves it
+          # from the base image without re-downloading. The upload doubled the
+          # wall time of an otherwise finished build.
+          #
+          # cache-from is kept so a repeat build can still reuse what the registry
+          # can give it.
+          cache-from: type=gha
