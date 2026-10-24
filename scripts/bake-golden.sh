@@ -142,6 +142,10 @@ stage_wait() {
     # Success: the guest is booting from the installed disk.
     if docker logs "$NAME" 2>&1 | grep -qE "$WINDOWS_BOOTED"; then
       log "Windows Boot Manager is booting from the hard disk after ${SECONDS}s"
+      # Record the disk path WHILE the container still runs. docker exec cannot
+      # inspect a stopped container, and this stage is about to stop this one.
+      docker exec "$NAME" find /storage -maxdepth 2 -type f -size +1G \( -name "*.img" -o -name "*.qcow2" \) 2>/dev/null | tr -d "\r" > "$STORAGE/.disk-path" || true
+      log "recorded disk path: $(head -1 "$STORAGE/.disk-path" 2>/dev/null)"
       log "stopping the guest so dockur records its boot marker"
       # docker stop sends ACPI shutdown; finish() then runs markWindowsBooted and
       # writes $STORAGE/boot. Give it room: Windows takes a while to shut down.
@@ -187,71 +191,58 @@ stage_wait() {
 }
 
 stage_extract() {
-  # Already stopped by stage_wait once Windows booted from its own disk; stopping
-  # again is a no-op and keeps the stage usable on its own.
+  # stage_wait already stopped the container once Windows booted from its own
+  # disk; stopping again is a no-op and keeps this stage usable on its own.
   log "stopping the guest so the filesystem is consistent"
   docker stop -t 180 "$NAME" >/dev/null 2>&1 || true
 
-  # The disk is data.img, not data.qcow2.
+  # Pull the disk out with docker cp.
   #
-  # dockur names it after DISK_SIZE handling in the base image's disk.sh, and the
-  # only filename referenced in dockur-windows source is "$STORAGE/windows." for
-  # the boot media - the install target is data.img. A *.qcow2 glob finds nothing,
-  # which is the same mistake the heartbeat made.
+  # docker exec cannot help: the container is stopped by now (it has to be, or the
+  # disk is not consistent) and exec needs a running one. cp works on a stopped
+  # container.
   #
-  # Pick the largest file that qemu-img recognises as a disk, so this survives a
-  # future rename without silently picking up the ISO.
-  # Search the WHOLE tree, not maxdepth 2, and report what was there.
-  #
-  # The previous attempt found nothing at maxdepth 2 even though the guest had
-  # been writing 18 GiB into the disk, so either the disk is deeper or it is not
-  # visible from the runner at all - which matters, because dockur declares
-  # VOLUME /storage and a bind mount should expose everything. Printing the tree
-  # is what tells those two cases apart next time.
-  # Ask the CONTAINER where its disk is, then translate it to the host path.
-  #
-  # The runner-side search came up empty even though du had watched 18 GiB land in
-  # $STORAGE, which means the disk is not where a host-side find looks. dockur
-  # declares VOLUME /storage, and a bind mount should hide that, but the only way
-  # to be sure is to ask the container - and it also removes the guesswork about
-  # the filename (data.img, not data.qcow2) entirely.
-  # docker cp, not docker exec: stage_wait stops the container before this runs
-  # (it has to, so the disk is consistent), and docker exec needs a RUNNING
-  # container. cp works on a stopped one.
-  #
-  # Try the likely names first - data.img is what the previous run wrote, per its
-  # du climbing to 18 GiB - then fall back to listing /storage with cp -L of a
-  # glob, which docker will expand inside the container.
+  # The name is not worth guessing either. A host-side find at maxdepth 2 came up
+  # empty on a run whose du had watched 18 GiB land in $STORAGE, so stage_wait now
+  # records the exact path with find while the container is still up, and this
+  # reads it back. Trying a few likely names first covers a run where that file is
+  # missing, then a host sweep covers the rest.
   SRC=""
-  for name in data.img data.qcow2 windows.img windows.qcow2; do
-    if docker cp "$NAME:/storage/$name" "$STORAGE/$name.copied" >/dev/null 2>&1; then
-      log "copied /storage/$name out of the container"
-      SRC="$STORAGE/$name.copied"
-      break
+  inner=$(head -1 "$STORAGE/.disk-path" 2>/dev/null || true)
+  if [ -n "$inner" ]; then
+    log "copying $inner out of the container"
+    if docker cp "$NAME:$inner" "$STORAGE/from-container.img" >/dev/null 2>&1; then
+      SRC="$STORAGE/from-container.img"
     fi
-  done
-
-  # Fall back to a host-side sweep at any depth if the container could not say.
-  if [ -z "$SRC" ]; then
-    while IFS= read -r f; do
-      [ "$(stat -c %s "$f" 2>/dev/null || echo 0)" -gt $((1024*1024*1024)) ] || continue
-      case "$f" in *.iso) continue ;; esac
-      if qemu-img info "$f" >/dev/null 2>&1; then SRC="$f"; break; fi
-    done < <(find "$STORAGE" -type f -printf "%s %p\n" 2>/dev/null | sort -rn | cut -d" " -f2-)
   fi
 
   if [ -z "$SRC" ]; then
-    log "no qemu disk image found under $STORAGE; tree follows"
+    for name in data.img data.qcow2 windows.img windows.qcow2; do
+      if docker cp "$NAME:/storage/$name" "$STORAGE/$name.copied" >/dev/null 2>&1; then
+        log "copied /storage/$name out of the container"
+        SRC="$STORAGE/$name.copied"
+        break
+      fi
+    done
+  fi
+
+  # Last resort: sweep the host mount, skipping ISOs because qemu-img reads them
+  # happily and would otherwise be picked as "a disk".
+  if [ -z "$SRC" ]; then
+    while IFS= read -r f; do
+      case "$f" in *.iso) continue ;; esac
+      if qemu-img info "$f" >/dev/null 2>&1; then SRC="$f"; break; fi
+    done < <(find "$STORAGE" -type f -size +1G -printf "%s %p\n" 2>/dev/null | sort -rn | cut -d" " -f2-)
+  fi
+
+  if [ -z "$SRC" ]; then
+    log "no disk found; storage tree:"
     find "$STORAGE" -maxdepth 3 -printf "%10s %p\n" 2>/dev/null | sort -rn | head -20 || true
-    # The container may hold the disk on a volume the bind mount did not cover.
-    log "what the container itself sees:"
-    docker exec "$NAME" sh -c 'ls -la /storage; echo ---; du -sh /storage/* 2>/dev/null' 2>&1 | head -20 || true
     return 1
   fi
 
   log "extracting $SRC"
   ls -la "$SRC"
-  # Convert so the output is a standalone qcow2 whatever the source format was.
   qemu-img convert -O qcow2 "$SRC" "$OUT"
   qemu-img info "$OUT" | head -6
   docker rm -f "$NAME" >/dev/null 2>&1 || true
