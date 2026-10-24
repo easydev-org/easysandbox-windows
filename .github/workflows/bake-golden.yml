@@ -54,6 +54,15 @@ jobs:
       # rule out "the container died for lack of space" before trusting any other
       # diagnosis. These two steps report the disk, then free what the runner image
       # ships and a Windows bake never touches.
+      # qemu-utils provides qemu-img, which the extract step needs to convert the
+      # raw dockur disk into the qcow2 the image expects. Without it the bake gets
+      # all the way to extraction and then dies with 'qemu-img: command not found'
+      # (exit 127) - exactly what the first otherwise-successful run did.
+      - name: tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-utils
+          qemu-img --version | head -1
       - name: disk before
         run: df -h / "" || true
 
