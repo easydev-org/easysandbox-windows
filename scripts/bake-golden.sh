@@ -208,11 +208,37 @@ stage_extract() {
   # visible from the runner at all - which matters, because dockur declares
   # VOLUME /storage and a bind mount should expose everything. Printing the tree
   # is what tells those two cases apart next time.
+  # Ask the CONTAINER where its disk is, then translate it to the host path.
+  #
+  # The runner-side search came up empty even though du had watched 18 GiB land in
+  # $STORAGE, which means the disk is not where a host-side find looks. dockur
+  # declares VOLUME /storage, and a bind mount should hide that, but the only way
+  # to be sure is to ask the container - and it also removes the guesswork about
+  # the filename (data.img, not data.qcow2) entirely.
+  # docker cp, not docker exec: stage_wait stops the container before this runs
+  # (it has to, so the disk is consistent), and docker exec needs a RUNNING
+  # container. cp works on a stopped one.
+  #
+  # Try the likely names first - data.img is what the previous run wrote, per its
+  # du climbing to 18 GiB - then fall back to listing /storage with cp -L of a
+  # glob, which docker will expand inside the container.
   SRC=""
-  while IFS= read -r f; do
-    [ "$(stat -c %s "$f" 2>/dev/null || echo 0)" -gt $((1024*1024*1024)) ] || continue
-    if qemu-img info "$f" >/dev/null 2>&1; then SRC="$f"; break; fi
-  done < <(find "$STORAGE" -type f -printf "%s %p\n" 2>/dev/null | sort -rn | cut -d" " -f2-)
+  for name in data.img data.qcow2 windows.img windows.qcow2; do
+    if docker cp "$NAME:/storage/$name" "$STORAGE/$name.copied" >/dev/null 2>&1; then
+      log "copied /storage/$name out of the container"
+      SRC="$STORAGE/$name.copied"
+      break
+    fi
+  done
+
+  # Fall back to a host-side sweep at any depth if the container could not say.
+  if [ -z "$SRC" ]; then
+    while IFS= read -r f; do
+      [ "$(stat -c %s "$f" 2>/dev/null || echo 0)" -gt $((1024*1024*1024)) ] || continue
+      case "$f" in *.iso) continue ;; esac
+      if qemu-img info "$f" >/dev/null 2>&1; then SRC="$f"; break; fi
+    done < <(find "$STORAGE" -type f -printf "%s %p\n" 2>/dev/null | sort -rn | cut -d" " -f2-)
+  fi
 
   if [ -z "$SRC" ]; then
     log "no qemu disk image found under $STORAGE; tree follows"
