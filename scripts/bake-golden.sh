@@ -201,15 +201,25 @@ stage_extract() {
   #
   # Pick the largest file that qemu-img recognises as a disk, so this survives a
   # future rename without silently picking up the ISO.
+  # Search the WHOLE tree, not maxdepth 2, and report what was there.
+  #
+  # The previous attempt found nothing at maxdepth 2 even though the guest had
+  # been writing 18 GiB into the disk, so either the disk is deeper or it is not
+  # visible from the runner at all - which matters, because dockur declares
+  # VOLUME /storage and a bind mount should expose everything. Printing the tree
+  # is what tells those two cases apart next time.
   SRC=""
   while IFS= read -r f; do
-    [ "$(stat -c %s "$f" 2>/dev/null || echo 0)" -gt $((2*1024*1024*1024)) ] || continue
+    [ "$(stat -c %s "$f" 2>/dev/null || echo 0)" -gt $((1024*1024*1024)) ] || continue
     if qemu-img info "$f" >/dev/null 2>&1; then SRC="$f"; break; fi
-  done < <(find "$STORAGE" -maxdepth 2 -type f -printf "%s %p\n" 2>/dev/null | sort -rn | cut -d" " -f2-)
+  done < <(find "$STORAGE" -type f -printf "%s %p\n" 2>/dev/null | sort -rn | cut -d" " -f2-)
 
   if [ -z "$SRC" ]; then
-    log "no qemu disk image found under $STORAGE"
-    ls -la "$STORAGE" || true
+    log "no qemu disk image found under $STORAGE; tree follows"
+    find "$STORAGE" -maxdepth 3 -printf "%10s %p\n" 2>/dev/null | sort -rn | head -20 || true
+    # The container may hold the disk on a volume the bind mount did not cover.
+    log "what the container itself sees:"
+    docker exec "$NAME" sh -c 'ls -la /storage; echo ---; du -sh /storage/* 2>/dev/null' 2>&1 | head -20 || true
     return 1
   fi
 
