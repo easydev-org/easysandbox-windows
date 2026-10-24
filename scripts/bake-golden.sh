@@ -110,7 +110,10 @@ stage_wait() {
     # has stopped moving is the one way to tell "still installing" from "stuck".
     if (( SECONDS - last_beat >= 30 )); then
       last_beat=$SECONDS
-      disk=$(find "$STORAGE" -name "*.qcow2" -type f -printf "%s\n" 2>/dev/null | sort -n | tail -1)
+      # || true on the substitution: an empty snapshot must not abort the loop
+      # under set -e before the disk exists, and the same pattern in the macOS
+      # script killed that job exactly one heartbeat in.
+      disk=$(find "$STORAGE" -name "*.qcow2" -type f -printf "%s\n" 2>/dev/null | sort -n | tail -1 || true)
       : "${disk:=0}"
       tail_line=$(docker logs --tail 1 "$NAME" 2>&1 | tr -d "\r" | cut -c1-100 || true)
       log "${SECONDS}s  disk=$((disk/1048576))MiB  dockur: $tail_line"
