@@ -85,64 +85,137 @@ stage_start() {
     -e "CPU_CORES=$CPUS" \
     -v "$STORAGE:/storage" \
     dockurr/windows > /dev/null
-  sleep 5
+  # "docker run -d" succeeding only means the container was CREATED. If its
+  # entrypoint dies immediately - insufficient memory or disk is the usual reason -
+  # the container is gone before the next step looks, and wait then heartbeats
+  # nothing for an hour. Fail here instead, with the container log attached.
+  local i
+  for i in $(seq 1 30); do
+    if ! docker ps --format "{{.Names}}" | grep -qx "$NAME"; then
+      log "container is not running after ${i}s; its log:"
+      docker logs "$NAME" 2>&1 | tail -40 || true
+      docker inspect -f "{{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}}" "$NAME" 2>/dev/null || true
+      return 1
+    fi
+    if [ -n "$(docker logs "$NAME" 2>&1 | head -1)" ] || [ "$i" -ge 10 ]; then break; fi
+    sleep 1
+  done
   docker ps --filter "name=^$NAME$" --format "{{.Names}} {{.Status}}" || true
+  first=$(docker logs "$NAME" 2>&1 | head -3 | tr "\n" " " || true)
+  log "first container output: ${first}"
   log "start done"
 }
 
 stage_wait() {
-  log "waiting for $STORAGE/boot (dockur creates it only after Setup completes)"
-  # The marker, not a timer: install.sh createMarker "boot" runs after a
-  # successful installation, and its presence is also what stops this container
-  # re-installing on the next start. Any other signal means "has been running",
-  # not "finished".
+  echo_phase() { log "$*"; }
+  log "waiting for Windows to finish Setup and boot from its own disk"
+
+  # WHY NOT WAIT FOR $STORAGE/boot.
+  #
+  # That marker looked like the obvious signal, but power.sh only calls
+  # markWindowsBooted() from finish() - i.e. when the container is shutting down:
+  #
+  #   finish() { ... if ! hasBootMarker; then markWindowsBooted; fi ... }
+  #
+  # So it is written AFTER shutdown, never during installation. Waiting for it
+  # while the guest is running can only ever time out - which is what happened:
+  # 62 minutes of a perfectly healthy install spent waiting for a file that the
+  # container writes on its way out.
+  #
+  # What dockur itself uses to decide "setup has progressed far enough" is the
+  # firmware line for the hard-disk boot:
+  #
+  #   ready()  ->  grep UEFI_WINDOWS_BOOT_PATTERN
+  #                'BdsDxe: starting BootNNNN "Windows Boot Manager" from .*HD('
+  #
+  # Once that appears, Windows Setup has written the boot manager and the guest is
+  # booting macOS-style from its own disk. At that point we stop the container
+  # ourselves; finish() then records the marker, and extract can verify it.
+  #
+  # The heartbeat reports du, not stat: data.img is a sparse qcow2 whose apparent
+  # size is the full DISK_SIZE (64 GiB) from the moment it is created, so stat sat
+  # at 65536 MiB for the whole run while the file was still filling up.
+  WINDOWS_BOOTED='BdsDxe: starting Boot[[:xdigit:]]{4} "Windows Boot Manager" from .*HD\('
   deadline=$(( SECONDS + WAIT ))
   last_beat=0
   while (( SECONDS < deadline )); do
-    if [ -f "$STORAGE/boot" ]; then log "boot marker present after ${SECONDS}s"; return 0; fi
-    if ! docker ps --format "{{.Names}}" | grep -qx "$NAME"; then
-      log "container exited before the marker appeared; tail:"
-      docker logs "$NAME" 2>&1 | tail -60 || true
+    # Success: the guest is booting from the installed disk.
+    if docker logs "$NAME" 2>&1 | grep -qE "$WINDOWS_BOOTED"; then
+      log "Windows Boot Manager is booting from the hard disk after ${SECONDS}s"
+      log "stopping the guest so dockur records its boot marker"
+      # docker stop sends ACPI shutdown; finish() then runs markWindowsBooted and
+      # writes $STORAGE/boot. Give it room: Windows takes a while to shut down.
+      docker stop -t 300 "$NAME" >/dev/null 2>&1 || true
+      if [ -f "$STORAGE/boot" ]; then
+        log "boot marker written by dockur; install confirmed"
+      else
+        log "NOTE: no boot marker after shutdown, but the firmware confirmed a hard-disk boot"
+      fi
+      return 0
+    fi
+
+    # A failed boot attempt after the marker appeared is terminal.
+    if docker logs "$NAME" 2>&1 | grep -q 'BdsDxe: failed to start .*Windows Boot Manager'; then
+      log "firmware reports the Windows Boot Manager failed to start"
+      docker logs "$NAME" 2>&1 | tail -80 || true
       return 1
     fi
-    # Heartbeat every 30s. The qcow2 size is the only health signal visible from
-    # the host: dockur creates the disk early and Setup grows it, so a size that
-    # has stopped moving is the one way to tell "still installing" from "stuck".
+
+    if ! docker ps --format "{{.Names}}" | grep -qx "$NAME"; then
+      log "container exited before Windows booted; tail:"
+      docker logs "$NAME" 2>&1 | tail -80 || true
+      return 1
+    fi
+
     if (( SECONDS - last_beat >= 30 )); then
       last_beat=$SECONDS
-      # The disk is NOT *.qcow2. dockur names the Windows disk windows.<ext>
-      # (install.sh compares "$STORAGE/windows."), and the base image's disk.sh
-      # decides the extension, so a "*.qcow2" glob reports 0 MiB forever while the
-      # guest installs perfectly - which is exactly what happened: the heartbeat
-      # said 0 MiB for 50 minutes while the log showed Windows Boot Manager
-      # running. Match on the largest regular file instead of guessing a name.
-      #
-      # || true on the substitution: an empty snapshot must not abort the loop
-      # under set -e before the disk exists, and the same pattern in the macOS
-      # script killed that job exactly one heartbeat in.
-      biggest=$(find "$STORAGE" -maxdepth 2 -type f -printf "%s %p\n" 2>/dev/null | sort -n | tail -1 || true)
-      disk=${biggest%% *}; : "${disk:=0}"
-      diskname=${biggest#* }; : "${diskname:=none}"
-      tail_line=$(docker logs --tail 1 "$NAME" 2>&1 | tr -d "\r" | cut -c1-90 || true)
-      log "${SECONDS}s  biggest=$((disk/1048576))MiB ($(basename "$diskname"))  dockur: $tail_line"
+      # du = actual blocks used. stat would report the sparse file's apparent
+      # size (the full DISK_SIZE) and never move.
+      used=$(du -m "$STORAGE" 2>/dev/null | awk '{print $1}' || true)
+      : "${used:=0}"
+      iso=$(ls -1 "$STORAGE"/*.iso 2>/dev/null | head -1 || true)
+      tail_line=$(docker logs --tail 1 "$NAME" 2>&1 | tr -d "\r" | cut -c1-80 || true)
+      log "${SECONDS}s  storage_used=${used}MiB iso=$(basename "${iso:-none}")  dockur: $tail_line"
     fi
     sleep 20
   done
-  log "TIMEOUT after ${WAIT}s; tail:"
-  docker logs "$NAME" 2>&1 | tail -60 || true
+
+  log "TIMEOUT after ${WAIT}s"
+  log "storage:"; ls -la "$STORAGE" 2>/dev/null | head -10 || true
+  docker logs "$NAME" 2>&1 | tail -80 || true
   return 1
 }
 
 stage_extract() {
+  # Already stopped by stage_wait once Windows booted from its own disk; stopping
+  # again is a no-op and keeps the stage usable on its own.
   log "stopping the guest so the filesystem is consistent"
   docker stop -t 180 "$NAME" >/dev/null 2>&1 || true
-  shopt -s nullglob
-  cands=("$STORAGE"/data.qcow2 "$STORAGE"/*.qcow2)
-  if [ ${#cands[@]} -eq 0 ]; then log "no qcow2 under $STORAGE"; ls -la "$STORAGE"; return 1; fi
-  SRC="${cands[0]}"
+
+  # The disk is data.img, not data.qcow2.
+  #
+  # dockur names it after DISK_SIZE handling in the base image's disk.sh, and the
+  # only filename referenced in dockur-windows source is "$STORAGE/windows." for
+  # the boot media - the install target is data.img. A *.qcow2 glob finds nothing,
+  # which is the same mistake the heartbeat made.
+  #
+  # Pick the largest file that qemu-img recognises as a disk, so this survives a
+  # future rename without silently picking up the ISO.
+  SRC=""
+  while IFS= read -r f; do
+    [ "$(stat -c %s "$f" 2>/dev/null || echo 0)" -gt $((2*1024*1024*1024)) ] || continue
+    if qemu-img info "$f" >/dev/null 2>&1; then SRC="$f"; break; fi
+  done < <(find "$STORAGE" -maxdepth 2 -type f -printf "%s %p\n" 2>/dev/null | sort -rn | cut -d" " -f2-)
+
+  if [ -z "$SRC" ]; then
+    log "no qemu disk image found under $STORAGE"
+    ls -la "$STORAGE" || true
+    return 1
+  fi
+
   log "extracting $SRC"
   ls -la "$SRC"
-  # Convert so the output is a standalone qcow2 regardless of what dockur used.
+  # Convert so the output is a standalone qcow2 whatever the source format was.
   qemu-img convert -O qcow2 "$SRC" "$OUT"
   qemu-img info "$OUT" | head -6
   docker rm -f "$NAME" >/dev/null 2>&1 || true
