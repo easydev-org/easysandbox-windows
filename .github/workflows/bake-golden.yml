@@ -1,0 +1,72 @@
+name: bake-golden
+
+# Produce the Windows golden disk this image boots.
+#
+# PRODUCE vs CONSUME. dockur/windows produces the disk: a complete QEMU guest
+# with unattended installation wired in (answer.sh rewrites the autounattend XML
+# per version). This repository consumes it - Containerfile takes
+# GOLDEN_DISK_IMAGE and golden-disk.sh boots an overlay - so the bake lives here
+# next to what uses it, and a change to either lands in one place.
+#
+# WHY FOUR STEPS. GitHub has no streaming log API: /actions/jobs/{id}/logs
+# redirects to a blob published only after the job ends, and is 403/404 while the
+# job runs; /actions/runs/{id}/logs does not exist. The one live, documented
+# progress signal is the step list from /actions/jobs/{id}, so the bake is split
+# into prepare -> start -> wait -> extract. Inside wait a 30s heartbeat prints
+# the qcow2 size, which is the only health signal visible from the host.
+#
+# amd64 only. dockurr/windows is multi-arch and would install ARM64 Windows
+# natively on an aarch64 host, but ubuntu-24.04-arm provides no /dev/kvm
+# (measured: udevadm trigger -> Failed to open the device kvm: Invalid
+# argument). Without KVM the guest falls back to TCG where an install takes many
+# hours, so arm64 needs a self-hosted aarch64 runner.
+#
+# Manual only: a 60-90 minute install producing a ~30 GiB disk.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Windows version for dockur (11, 10, 2022 ...)"
+        required: false
+        default: "11"
+      disk_size:
+        description: "qcow2 capacity passed to dockur"
+        required: false
+        default: "64G"
+
+permissions:
+  contents: read
+
+jobs:
+  bake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      VERSION: ${{ github.event.inputs.version }}
+      DISK_SIZE: ${{ github.event.inputs.disk_size }}
+      STORAGE: ${{ github.workspace }}/storage
+      OUT: ${{ github.workspace }}/out/windows.qcow2
+    steps:
+      - uses: actions/checkout@v4
+      - name: bake prepare
+        run: sudo -E bash scripts/bake-golden.sh prepare
+      - name: bake start container
+        run: sudo -E bash scripts/bake-golden.sh start
+      - name: bake wait for install
+        run: sudo -E bash scripts/bake-golden.sh wait
+      - name: bake extract disk
+        run: sudo -E bash scripts/bake-golden.sh extract
+      - name: debug container
+        if: failure()
+        run: |
+          sudo docker ps -a || true
+          sudo docker logs --tail 200 winbake 2>&1 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: golden-windows
+          path: ${{ github.workspace }}/out/windows.qcow2
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
