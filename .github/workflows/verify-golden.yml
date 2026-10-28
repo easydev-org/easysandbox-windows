@@ -79,6 +79,47 @@ jobs:
           ls -la storage/11/
           qemu-img info storage/11/data.img || true
 
+      # Read the disk before booting it. Whether Windows finished installing is
+      # recorded in the filesystem: a completed install has a large Windows
+      # directory, a setup-in-progress one has a small one plus
+      # \$WINDOWS.~BT / \$WINDOWS.~WS staging trees. That distinction is what the
+      # screenshots alone could not settle, because a Setup screen looks the same
+      # whether the files behind it are complete or not.
+      - name: inspect the disk contents
+        run: |
+          set -x
+          sudo apt-get install -y -qq libguestfs-tools >/dev/null 2>&1 || true
+          # virt-filesystems/virt-ls read the qcow2 without booting anything.
+          if command -v virt-ls >/dev/null 2>&1; then
+            sudo virt-filesystems -a storage/11/data.img --all --long -h || true
+            echo "=== top level ==="
+            sudo virt-ls -a storage/11/data.img -m /dev/sda4 / 2>/dev/null | head -40 \
+              || sudo virt-ls -a storage/11/data.img -m /dev/sda3 / 2>/dev/null | head -40 \
+              || true
+            echo "=== staging trees (present => install did not finish) ==="
+            sudo virt-ls -a storage/11/data.img -m /dev/sda4 / 2>/dev/null | grep -E 'WINDOWS\.~|Windows|Users|Program' || true
+          else
+            echo "virt-ls unavailable; falling back to qemu-nbd"
+            sudo modprobe nbd max_part=16 || true
+            sudo qemu-nbd -c /dev/nbd0 storage/11/data.img || true
+            sleep 3
+            lsblk /dev/nbd0 || true
+            sudo partx -a /dev/nbd0 2>/dev/null || true
+            sudo blkid /dev/nbd0p* 2>/dev/null || true
+            for p in /dev/nbd0p4 /dev/nbd0p3; do
+              if [ -b "$p" ]; then
+                sudo mkdir -p /mnt/win
+                if sudo mount -o ro "$p" /mnt/win 2>/dev/null; then
+                  echo "=== $p mounted ==="
+                  sudo ls -la /mnt/win | head -30 || true
+                  sudo umount /mnt/win || true
+                  break
+                fi
+              fi
+            done
+            sudo qemu-nbd -d /dev/nbd0 || true
+          fi
+
       - name: boot it
         run: |
           set -x
@@ -110,6 +151,39 @@ jobs:
           if [ -s screen.ppm ]; then python3 scripts/ppm2png.py screen.ppm screen.png || true; fi
           ls -la screen.* 2>/dev/null || echo "no screenshot"
 
+      # The first screenshot showed Windows Setup sitting on "Select language
+      # settings" - so the disk is not installed, and the answer file did not take
+      # effect. This step presses Next to find out which it is: if Setup continues,
+      # the disk holds a half-done install whose answer file was ignored; if the
+      # screen does not move, the image is not bootable at all.
+      #
+      # The key is sent through QEMU's own monitor, the same channel as the
+      # screenshot, because the container has no other way to touch the guest's
+      # keyboard.
+      - name: press Next and look again
+        if: always()
+        run: |
+          set -x
+          docker exec winverify python3 - <<'PY' 2>&1 | tail -8 || true
+          import socket, time
+          path = "/run/shm/monitor.sock"
+          s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          s.settimeout(15); s.connect(path); time.sleep(0.5)
+          try: s.recv(8192)
+          except Exception: pass
+          # HMP: "sendkey ret" is Enter. Tab then Enter would be safer on a page
+          # whose default button is already Next, but Enter acts on the default.
+          for cmd in ["sendkey ret"]:
+              s.sendall((cmd + "\n").encode()); time.sleep(1)
+          s.close()
+          print("sent Enter")
+          PY
+          sleep 20
+          docker exec winverify python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/shot3.ppm 2>&1 | tail -3 || true
+          docker cp winverify:/tmp/shot3.ppm ./screen3.ppm 2>/dev/null || true
+          if [ -s screen3.ppm ]; then python3 scripts/ppm2png.py screen3.ppm screen3.png || true; fi
+          ls -la screen3.* 2>/dev/null || true
+
       - name: second look
         if: always()
         run: |
@@ -133,6 +207,8 @@ jobs:
             screen.ppm
             screen2.png
             screen2.ppm
+            screen3.png
+            screen3.ppm
           if-no-files-found: warn
           retention-days: 14
 
