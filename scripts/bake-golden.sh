@@ -307,7 +307,13 @@ stage_wait() {
       local port="${SSH_PORT:-2222}"
       local ready=0 waited=0 banner=""
       while (( waited < 1200 )); do
-        banner=$( (exec 3<>/dev/tcp/127.0.0.1/$port && head -c 64 <&3) 2>/dev/null | tr -d '\r\n' || true)
+        # timeout is not optional here. The forwarder accepts the connection but
+        # sends nothing until a real sshd answers, so `head -c 64` blocks forever
+        # on an idle socket - and the previous version of this loop did exactly
+        # that: two heartbeats that should be 15s apart appeared 19 minutes apart,
+        # because each iteration hung on the read and only the sleep was counted.
+        # The 1200s budget would have taken many hours to expire.
+        banner=$(timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/$port && head -c 64 <&3" 2>/dev/null | tr -d '\r\n' || true)
         case "$banner" in
           SSH-*)
             log "SSH banner from the guest after ${waited}s: ${banner}"
@@ -393,9 +399,19 @@ stage_wait() {
         log "  disks: $(docker exec "$NAME" sh -c 'ls -la /storage/*.img 2>/dev/null | awk "{print \$5, \$9}"' 2>&1 | tr -d '\r' | tr '\n' ' ' || echo '?')"
         log "  dockur tail:"
         docker logs --tail 8 "$NAME" 2>&1 | tr -d "\r" | sed 's/^/      /' || true
-        # Force-capture a screendump, which is the only view of the guest itself
-        # when the serial console has gone quiet.
-        docker exec "$NAME" sh -c 'wget -qO- "http://127.0.0.1:8006/snapshot" >/dev/null 2>&1' || true
+        # Screendump through QEMU's own monitor. This is the only way to see what
+        # the guest is actually showing when the serial console has gone quiet -
+        # a spinning installer, a language prompt and a BSOD all look identical
+        # from outside, and the difference decides what to fix.
+        log "  screendump:"
+        docker exec "$NAME" sh -c '
+          sock=$(find /run /var/run /tmp -name "monitor.sock" 2>/dev/null | head -1)
+          if [ -n "$sock" ]; then
+            printf "screendump /storage/screen.ppm\nquit\n" | timeout 10 socat - UNIX-CONNECT:"$sock" 2>&1 | head -3
+            ls -la /storage/screen.ppm 2>/dev/null
+          else
+            echo "no monitor socket found"
+          fi' 2>&1 | tr -d "\r" | sed 's/^/      /' || true
       fi
     fi
     sleep 20
