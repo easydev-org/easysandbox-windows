@@ -534,6 +534,44 @@ stage_extract() {
   qemu-img info "$OUT" | head -6
   log "NOTE: $OUT is qcow2. Convert with 'qemu-img convert -O raw' before booting it"
   log "      with dockur, which uses format=raw for /storage/data.img."
+
+  # THE DISK ALONE IS NOT ENOUGH TO BOOT.
+  #
+  # This is what the verification kept tripping over. dockur's /storage holds a set
+  # of files, and two of them are load-bearing for a boot:
+  #
+  #   windows.vars  OVMF's variable store. The UEFI boot entry
+  #                 Boot0005 "Windows Boot Manager" lives HERE, not on the disk. Boot
+  #                 a disk without it and the firmware finds no boot entry, falls
+  #                 through to the next device, and starts the installation DVD -
+  #                 which looks exactly like a machine that never finished installing.
+  #
+  #   windows.ver   Records which release was installed. MANUAL=Y re-derives the
+  #                 boot mode from it, and with it missing the version degrades to
+  #                 plain win11, which flips on Secure Boot. A disk installed without
+  #                 Secure Boot then fails to boot under it.
+  #
+  # windows.rom/base/mac are carried along too: they are small, and a consumer that
+  # has to reconstruct them from scratch is a consumer that will get it wrong.
+  log "collecting the boot state files that go with the disk"
+  BOOTSTATE=""
+  for f in windows.vars windows.ver windows.base windows.mac windows.rom; do
+    if docker cp "$NAME:/storage/$f" "$STORAGE/$f" >/dev/null 2>&1; then
+      log "  collected $f ($(stat -c%s "$STORAGE/$f" 2>/dev/null || echo 0) bytes)"
+      BOOTSTATE="$BOOTSTATE $f"
+    else
+      log "  MISSING $f - a disk booted without it may not start"
+    fi
+  done
+
+  # Ship them beside the disk as one archive, so a consumer restores the whole
+  # /storage rather than juggling filenames.
+  if [ -n "$BOOTSTATE" ]; then
+    ( cd "$STORAGE" && tar czf "$OUT.bootstate.tar.gz" $BOOTSTATE ) \
+      && log "wrote $OUT.bootstate.tar.gz containing:$BOOTSTATE" \
+      || log "WARNING: could not archive the boot state files"
+  fi
+
   docker rm -f "$NAME" >/dev/null 2>&1 || true
   log "BAKED windows $VERSION -> $OUT"
 }

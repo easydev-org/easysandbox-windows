@@ -98,6 +98,24 @@ jobs:
           mkdir -p storage
           qemu-img convert -O raw "$disk" storage/data.img
           sudo chmod a+r storage/data.img
+
+          # Restore the state that travels with the disk. windows.vars carries the
+          # UEFI boot entry (Boot0005 "Windows Boot Manager") - without it the
+          # firmware has nothing to boot, falls through to the next device and
+          # starts the installation DVD, which looks identical to an unfinished
+          # install. windows.ver is what MANUAL=Y reads to decide the boot mode;
+          # missing it makes dockur assume plain win11 and switch Secure Boot on,
+          # which an install made without Secure Boot will not boot under.
+          state=$(find artifact -name '*.bootstate.tar.gz' | head -1)
+          if [ -n "$state" ]; then
+            echo "restoring boot state from $state"
+            tar xzf "$state" -C storage
+            ls -la storage/
+          else
+            echo "WARNING: no bootstate archive in the artifact - the disk may not boot"
+            echo "         (it needs windows.vars for the UEFI boot entry)"
+          fi
+
           ls -la storage/
           qemu-img info storage/data.img || true
 
