@@ -111,9 +111,16 @@ jobs:
           name: bake-wait
           interval: "20"
           command: sudo -E bash scripts/bake-golden.sh wait
-      # Ask the guest whether it will accept a login, while it is still running.
-      # This is the whole point of the OEM payload: a disk that can be scripted
-      # over ssh instead of clicked at.
+      # Capture what the guest is showing before it is stopped, the same way the
+      # macOS bake does. Disk size cannot distinguish "still installing" from
+      # "finished" or "stuck on a prompt"; a framebuffer dump can.
+      - name: bake screenshot
+        if: always()
+        run: |
+          mkdir -p screenshots
+          sudo SHOT_DIR="$PWD/screenshots" -E bash scripts/bake-golden.sh shot || true
+          sudo chown -R "$(id -u):$(id -g)" screenshots || true
+          ls -la screenshots || true
       # Runs even when wait failed. A disk that reached a desktop but whose ssh did
       # not come up is still worth having - it is a working Windows install - and
       # three runs have now thrown away a finished 12 GiB image because a port check
@@ -126,6 +133,13 @@ jobs:
         run: |
           sudo docker ps -a || true
           sudo docker logs --tail 200 winbake 2>&1 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bake-screenshots
+          path: screenshots/**
+          if-no-files-found: warn
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         if: always()
         with:

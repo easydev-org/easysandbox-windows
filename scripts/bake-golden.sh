@@ -72,20 +72,20 @@ stage_prepare() {
   mkdir -p "$STORAGE" "$(dirname "$OUT")"
   claim_kvm
 
-  # Stage the OEM payload into the folder dockur reads.
+  # NO OEM PAYLOAD. This bake produces a plain, clean Windows disk and nothing
+  # else: no install.bat, no extra software, no in-guest scripting. sshd is added
+  # later by booting the finished disk, so a failure there never costs another
+  # nineteen-minute install.
   #
-  # The payload lives in this repository (oem/install.bat) so it is reviewed and
-  # versioned with the rest of the bake, but dockur only looks inside its own
-  # container paths - /storage/oem among them. Copying here is what connects the
-  # two, and doing it in prepare means a missing or empty payload fails in seconds
-  # instead of after a ninety-minute install that quietly has no ssh.
-  local repo_oem="$(cd "$(dirname "$0")/.." && pwd)/oem"
-  if [ -d "$repo_oem" ]; then
-    mkdir -p "$STORAGE/oem"
-    cp -f "$repo_oem"/. "$STORAGE/oem"/ 2>/dev/null || cp -f "$repo_oem"/* "$STORAGE/oem"/
-    log "staged oem payload from $repo_oem"
+  # /storage must therefore contain nothing but dockur's own files. A leftover
+  # oem/ from an earlier attempt would be copied into the install media and run,
+  # which is the opposite of clean - so it is removed explicitly rather than
+  # assumed absent.
+  if [ -d "$STORAGE/oem" ]; then
+    log "removing stale oem payload from a previous attempt: $(ls -1 "$STORAGE/oem" | tr '\n' ' ')"
+    rm -rf "$STORAGE/oem"
   fi
-  require_oem_ssh || return 1
+
   # Nothing to download here: dockur fetches its own ISO inside the container,
   # and pre-fetching would pin a URL that dockur chooses. This stage exists so
   # the KVM claim and the workspace check happen in a fast, visible step - if
@@ -160,21 +160,15 @@ stage_start() {
   # was mangled and every line came back as "netdev [^" - useless.
   docker exec "$NAME" sh -c "ps -ef | tr ' ' '\n' | grep -E '^(hostfwd|netdev|user,id)' | head -8" 2>&1 | sed 's/^/    /' || true
 
-  log "start done"
-}
-
-require_oem_ssh() {
-  # The SSH setup rides in on dockur's OEM folder, which is an ordinary feature -
-  # /storage/oem is one of the four locations dockur looks in (install.sh,
-  # getOemFolder). If it is missing the install still succeeds and simply has no
-  # ssh, which is the failure this check exists to prevent: it would cost a full
-  # 90-minute bake to discover.
-  local bat="$STORAGE/oem/install.bat"
-  if [ ! -f "$bat" ]; then
-    log "ERROR: $bat is missing - the bake would produce a disk with no ssh"
-    return 1
+  # Put the framebuffer helper where the screenshot stage can call it. The
+  # container has python3 but not this script, and /storage is the one directory
+  # both sides share.
+  if [ -f "$(dirname "$0")/shotsock.py" ]; then
+    cp -f "$(dirname "$0")/shotsock.py" "$STORAGE/shotsock.py" 2>/dev/null || true
+    log "staged shotsock.py into the container's /storage"
   fi
-  log "oem payload present: $(wc -l < "$bat") lines of $bat"
+
+  log "start done"
 }
 
 stage_ssh_check() {
@@ -423,6 +417,58 @@ stage_wait() {
   return 1
 }
 
+stage_screenshot() {
+  # Capture what Windows is actually showing, the same way the macOS bake does.
+  #
+  # From outside the guest, "still installing", "settled on a prompt nobody will
+  # answer" and "finished but idle" are indistinguishable - all three look like a
+  # disk that stopped growing. The macOS driver settled this by asking QEMU for a
+  # framebuffer dump over its monitor socket, and that works here too.
+  #
+  # shotsock.py talks HMP over a unix socket, so it needs nothing but python3,
+  # which the dockur image ships. The socket path is not in dockur's source (it
+  # belongs to the qemux/qemu base layer), so it is found rather than assumed.
+  local out="${SHOT_DIR:-$STORAGE/screenshots}"
+  mkdir -p "$out"
+
+  log "locating the QEMU monitor socket"
+  local sock
+  sock=$(docker exec "$NAME" sh -c '
+      for d in /run /var/run /tmp /storage; do
+        find "$d" -maxdepth 3 -name "monitor.sock" 2>/dev/null
+      done | head -1' 2>/dev/null | tr -d "\r")
+  if [ -z "$sock" ]; then
+    log "no monitor.sock in the container; cannot screendump"
+    docker exec "$NAME" sh -c 'ls -la /run 2>/dev/null | head' || true
+    return 1
+  fi
+  log "monitor socket: $sock"
+
+  local ppm="/storage/.shot-$$.ppm"
+  if ! docker exec "$NAME" python3 /storage/shotsock.py "$sock" "$ppm" 2>&1 | tr -d "\r" | sed 's/^/    /'; then
+    log "screendump failed"
+    return 1
+  fi
+
+  local name
+  name="$(date -u +%H%M%S)-screen.ppm"
+  if docker cp "$NAME:$ppm" "$out/$name" >/dev/null 2>&1; then
+    log "saved $out/$name ($(stat -c%s "$out/$name" 2>/dev/null || echo 0) bytes)"
+  else
+    log "could not copy the framebuffer out of the container"
+    return 1
+  fi
+  docker exec "$NAME" rm -f "$ppm" >/dev/null 2>&1 || true
+
+  # A PNG plus the colour spread, which is how the macOS driver tells a wizard
+  # pane from a desktop without anyone looking at the image.
+  if [ -f "$(dirname "$0")/ppm2png.py" ]; then
+    docker exec "$NAME" sh -c "true" >/dev/null 2>&1 || true
+    python3 "$(dirname "$0")/ppm2png.py" "$out/$name" "${out}/$name.png" 2>&1 | sed 's/^/    /' || true
+  fi
+  return 0
+}
+
 stage_extract() {
   # stage_wait already stopped the container once Windows booted from its own
   # disk; stopping again is a no-op and keeps this stage usable on its own.
@@ -487,7 +533,8 @@ case "$STAGE" in
   start)   stage_prepare; stage_start ;;
   wait)    stage_wait ;;
   ssh)     stage_ssh_check ;;
+  shot)    stage_screenshot ;;
   extract) stage_extract ;;
-  all)     stage_prepare; stage_start; stage_wait; stage_ssh_check; stage_extract ;;
-  *) echo "usage: $0 [prepare|start|wait|ssh|extract|all]"; exit 64 ;;
+  all)     stage_prepare; stage_start; stage_wait; stage_screenshot; stage_extract ;;
+  *) echo "usage: $0 [prepare|start|wait|ssh|shot|extract|all]"; exit 64 ;;
 esac
