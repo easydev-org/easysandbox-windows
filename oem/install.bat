@@ -58,7 +58,18 @@ rem other symptom, and this log is the only record that survives into the disk.
 echo [ssh] state >> %LOG%
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Service sshd | Select-Object Name,Status,StartType | Format-List" >> %LOG% 2>&1
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-WindowsCapability -Online -Name OpenSSH.Server* | Select-Object Name,State | Format-List" >> %LOG% 2>&1
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Test-NetConnection -ComputerName 127.0.0.1 -Port 22 -InformationLevel Quiet" >> %LOG% 2>&1
+
+rem Record the accounts that exist, so the disk carries its own answer to "who can
+rem log in here". The bake passes USERNAME/PASSWORD to dockur, which creates the
+rem account in the unattend XML before this script runs - but nothing on the disk
+rem said which name it chose, and an earlier version of this pipeline shipped a
+rem check that logged in as an account that had never been created.
+echo [ssh] local users >> %LOG%
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-LocalUser | Select-Object Name,Enabled | Format-Table -AutoSize" >> %LOG% 2>&1
+echo [ssh] listening ports >> %LOG%
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-NetTCPConnection -State Listen | Where-Object LocalPort -eq 2222 | Select-Object LocalAddress,LocalPort,State | Format-Table -AutoSize" >> %LOG% 2>&1
+
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Test-NetConnection -ComputerName 127.0.0.1 -Port 2222 -InformationLevel Quiet" >> %LOG% 2>&1
 
 echo [ssh] done
 endlocal

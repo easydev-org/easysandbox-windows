@@ -32,6 +32,16 @@ OUT="${OUT:?set OUT}"
 WAIT="${WAIT:-5400}"
 NAME="${NAME:-winbake}"
 
+# The account inside the guest. Named once, here, and used by BOTH the docker run
+# that passes them to dockur and the ssh check that logs in with them.
+#
+# This was the gap: the check defaulted to docker/admin locally while docker run
+# passed nothing, so dockur created no such account and the machine came up with
+# the built-in Administrator. A green ssh step then proved only that SOME login
+# worked - and it was not this one.
+WIN_USER="${WIN_USER:-docker}"
+WIN_PASS="${WIN_PASS:-admin}"
+
 # A fixed name is what lets the stages be separate steps: step N+1 has to find
 # the container step N started. docker run would refuse a duplicate, so clear a
 # leftover from a previous attempt instead of failing on it.
@@ -112,6 +122,8 @@ stage_start() {
     -e "DISK_SIZE=$DISK_SIZE" \
     -e "RAM_SIZE=$RAM" \
     -e "CPU_CORES=$CPUS" \
+    -e "USERNAME=$WIN_USER" \
+    -e "PASSWORD=$WIN_PASS" \
     -p 2222:2222 \
     -v "$STORAGE:/storage" \
     dockurr/windows > /dev/null
@@ -175,8 +187,8 @@ stage_ssh_check() {
   # failed - both silent during the bake, and both fatal to every later step that
   # wants to script the machine instead of clicking it.
   local port="${SSH_PORT:-2222}"
-  local password="${PASSWORD:-admin}"
-  local user="${USERNAME:-docker}"
+  local password="$WIN_PASS"
+  local user="$WIN_USER"
   local i rc
 
   log "checking ssh on 127.0.0.1:$port (user $user)"
@@ -193,19 +205,31 @@ stage_ssh_check() {
   done
 
   if command -v sshpass >/dev/null 2>&1; then
-    sshpass -p "$password" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null       -o ConnectTimeout=15 -p "$port" "$user@127.0.0.1" 'echo SSH-OK; whoami' && return 0
+    if sshpass -p "$password" ssh -o StrictHostKeyChecking=no \
+         -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 \
+         -p "$port" "$user@127.0.0.1" 'echo SSH-OK; whoami'; then
+      log "login succeeded as $user"
+      return 0
+    fi
     log "ERROR: ssh handshake failed (password auth or account problem)"
     return 1
   fi
 
-  # No sshpass on the runner: prove the banner, which still separates 'sshd is
-  # listening' from 'something else holds the port'.
-  if (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null; then
-    head -c 40 <&3 > "$STATE/ssh-banner" 2>/dev/null || true
-    log "banner: $(tr -d '\r' < "$STATE/ssh-banner" 2>/dev/null | cut -c1-40)"
-  fi
-  log "sshpass is absent; listener confirmed, login not attempted"
-  return 0
+  # No sshpass: fall back to unattended ssh. It cannot supply a password, but it
+  # reports whether the account reaches the authentication stage - and that is the
+  # fact this check exists to establish. "Permission denied (publickey,password)"
+  # means the user is real and password auth is offered; a bare
+  # "Permission denied (publickey)" means password auth is off; "no such user"
+  # means the account was never created. Treating a missing sshpass as success -
+  # which the first version did - hid exactly that.
+  out=$(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+           -o BatchMode=yes -o ConnectTimeout=20 -p "$port" \
+           "$user@127.0.0.1" 'echo SSH-OK' 2>&1 || true)
+  log "ssh without sshpass said: $(printf '%s' "$out" | tr -d '\r' | tr '\n' ' ' | cut -c1-200)"
+  case "$out" in
+    *"publickey,password"*|*"password"*) log "account $user reaches password auth"; return 0 ;;
+    *) log "ERROR: account $user was not accepted"; return 1 ;;
+  esac
 }
 
 stage_wait() {
