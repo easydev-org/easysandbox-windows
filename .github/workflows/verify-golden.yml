@@ -1,0 +1,141 @@
+name: verify-golden
+
+# Boot an already-baked Windows golden disk and photograph it.
+#
+# WHY THIS EXISTS. Re-baking to answer "did it work?" costs twenty minutes and has
+# repeatedly thrown away a finished install over a defect in the checking code
+# rather than in the disk. The disk is the deliverable; the only question worth
+# asking of it afterwards is "does it come up?", and that is answerable by booting
+# it. Nothing here installs anything.
+#
+# MANUAL=Y is what makes dockur use the disk as-is: with it, install.sh returns
+# early instead of looking for an ISO and re-running Setup over the top.
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_run:
+        description: "Run id that holds the golden-windows artifact"
+        required: true
+        default: "40665204706"
+      artifact_name:
+        description: "Artifact name holding the disk"
+        required: false
+        default: "golden-windows"
+      wait_first:
+        description: "Seconds to let the guest run before the first screenshot"
+        required: false
+        default: "300"
+      wait_second:
+        description: "Seconds between the first and second screenshot"
+        required: false
+        default: "300"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-utils
+          qemu-img --version | head -1
+
+      - name: free disk space
+        run: |
+          set -x
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af || true
+          df -h / | tail -1
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.inputs.artifact_name }}
+          path: artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.inputs.artifact_run }}
+
+      - name: place the disk where dockur expects it
+        run: |
+          set -eux
+          disk=$(find artifact -type f -size +1G | head -1)
+          [ -n "$disk" ] || { echo "no large disk in the artifact"; find artifact | head; exit 1; }
+          ls -la "$disk"
+
+          # dockur's layout is /storage/<version>/data.img. The artifact holds a
+          # qcow2, which is what data.img can be - dockur passes it to qemu as-is.
+          mkdir -p storage/11
+          sudo cp --sparse=always "$disk" storage/11/data.img
+          sudo chmod a+r storage/11/data.img
+          ls -la storage/11/
+          qemu-img info storage/11/data.img || true
+
+      - name: boot it
+        run: |
+          set -x
+          # MANUAL=Y: a disk already exists, so dockur must boot it rather than
+          # install over it. NET_ADMIN gives a real bridge instead of the passt
+          # fallback, and /dev/net/tun is what the bridge needs.
+          docker run -d --name winverify \
+            --device=/dev/kvm --device=/dev/net/tun --cap-add NET_ADMIN \
+            -e VERSION=11 -e MANUAL=Y -e DISK_SIZE=64G -e RAM_SIZE=8G -e CPU_CORES=4 \
+            -p 2222:2222 \
+            -v "$GITHUB_WORKSPACE/storage:/storage" \
+            dockurr/windows
+          sleep 30
+          docker ps -a
+          docker logs --tail 60 winverify || true
+
+      - name: first look
+        run: |
+          set -x
+          sleep "${{ github.event.inputs.wait_first }}"
+          docker ps -a
+          echo "=== container log ==="
+          docker logs --tail 100 winverify || true
+          docker cp scripts/shotsock.py winverify:/tmp/shotsock.py
+          # /run/shm is where dockur's QEMU monitor socket lives; the macOS verify
+          # workflow uses the same path.
+          docker exec winverify python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/shot.ppm 2>&1 | tail -5 || true
+          docker cp winverify:/tmp/shot.ppm ./screen.ppm 2>/dev/null || true
+          if [ -s screen.ppm ]; then python3 scripts/ppm2png.py screen.ppm screen.png || true; fi
+          ls -la screen.* 2>/dev/null || echo "no screenshot"
+
+      - name: second look
+        if: always()
+        run: |
+          set -x
+          sleep "${{ github.event.inputs.wait_second }}"
+          docker cp scripts/shotsock.py winverify:/tmp/shotsock.py 2>/dev/null || true
+          docker exec winverify python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/shot2.ppm 2>&1 | tail -5 || true
+          docker cp winverify:/tmp/shot2.ppm ./screen2.ppm 2>/dev/null || true
+          if [ -s screen2.ppm ]; then python3 scripts/ppm2png.py screen2.ppm screen2.png || true; fi
+          ls -la screen2.* 2>/dev/null || true
+          echo "=== final container state ==="
+          docker ps -a
+          docker logs --tail 40 winverify || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verify-screenshots
+          path: |
+            screen.png
+            screen.ppm
+            screen2.png
+            screen2.ppm
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: stop
+        if: always()
+        run: docker rm -f winverify || true
