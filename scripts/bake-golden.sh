@@ -103,7 +103,13 @@ stage_start() {
     # equal number. That is exactly how dockur's own readme publishes RDP - 3389:3389,
     # not 3389:3389-to-something-else - and publishing 2222:22 forwards to guest port
     # 2222, where nothing listens. Measured: the check timed out its full 200s.
-    -p 22:22 \
+    # Host 2222 -> container 2222 -> guest 2222, all the same number because the base
+    # layer forwards a published port to the guest port of equal number. 22 on the
+    # host side is a privileged port and docker refuses it for a non-root user, which
+    # is what killed the previous attempt in under a second.
+    #
+    # Guest sshd therefore has to listen on 2222 as well; the OEM script sets that.
+    -p 2222:2222 \
     -v "$STORAGE:/storage" \
     dockurr/windows > /dev/null
   # "docker run -d" succeeding only means the container was CREATED. If its
@@ -124,6 +130,16 @@ stage_start() {
   docker ps --filter "name=^$NAME$" --format "{{.Names}} {{.Status}}" || true
   first=$(docker logs "$NAME" 2>&1 | head -3 | tr "\n" " " || true)
   log "first container output: ${first}"
+
+  # Record what port forwarding actually exists, rather than assuming it. The base
+  # layer (qemux/qemu, which owns network.sh) decides how a published port reaches
+  # the guest, and that file is not in this repository - so the only honest source
+  # is the running container.
+  log "port mappings as docker sees them:"
+  docker port "$NAME" 2>&1 | sed 's/^/    /' || true
+  log "qemu network arguments:"
+  docker exec "$NAME" sh -c "ps -ef | grep -o 'netdev [^ ]*' | head -5" 2>&1 | sed 's/^/    /' || true
+
   log "start done"
 }
 
@@ -152,7 +168,7 @@ stage_ssh_check() {
   # A closed port here means the OEM payload did not run or the capability install
   # failed - both silent during the bake, and both fatal to every later step that
   # wants to script the machine instead of clicking it.
-  local port="${SSH_PORT:-22}"
+  local port="${SSH_PORT:-2222}"
   local password="${PASSWORD:-admin}"
   local user="${USERNAME:-docker}"
   local i rc

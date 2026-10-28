@@ -40,10 +40,18 @@ if not exist "%ProgramData%\ssh" mkdir "%ProgramData%\ssh"
 if not exist "%ProgramData%\ssh\sshd_config" echo PasswordAuthentication yes > "%ProgramData%\ssh\sshd_config"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='C:\ProgramData\ssh\sshd_config'; $c=Get-Content $p; $c=$c -replace '^#?\s*PasswordAuthentication.*','PasswordAuthentication yes'; Set-Content -Path $p -Value $c" >> %LOG% 2>&1
 
+rem Listen on 2222, not the default 22.
+rem
+rem The base layer forwards a published container port to the guest port with the
+rem same number, and the host side cannot use 22 (privileged, refused for the
+rem runner user). So the whole chain is 2222:  host 2222 -> container 2222 -> guest
+rem 2222. Changing sshd's port here is what closes the loop.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "(Get-Content 'C:\ProgramData\ssh\sshd_config') -replace '^#?\s*Port\s.*','Port 2222' | Set-Content 'C:\ProgramData\ssh\sshd_config'" >> %LOG% 2>&1
+
 rem The firewall rule the capability normally adds can be missing when the
-rem service starts this early, and a closed port 22 looks exactly like a dead
-rem sshd from the network side.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "if (-not (Get-NetFirewallRule -Name sshd -ErrorAction SilentlyContinue)) { New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH Server' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null }" >> %LOG% 2>&1
+rem service starts this early, and a closed port looks exactly like a dead sshd
+rem from the network side.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "if (-not (Get-NetFirewallRule -Name sshd -ErrorAction SilentlyContinue)) { New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH Server' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 2222 | Out-Null }" >> %LOG% 2>&1
 
 rem Report what actually happened. A capability install that quietly fails has no
 rem other symptom, and this log is the only record that survives into the disk.
