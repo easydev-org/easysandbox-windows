@@ -116,6 +116,27 @@ jobs:
             echo "         (it needs windows.vars for the UEFI boot entry)"
           fi
 
+          # Tell dockur the installation is finished, instead of telling it to run
+          # in MANUAL mode.
+          #
+          # This is the difference that matters. MANUAL=Y reaches this branch in
+          # install.sh:
+          #
+          #   if (enabled "$aborted" || enabled "$MANUAL"); then
+          #       if (DETECTED == "win11"*) { BOOT_MODE = "windows_secure"; }
+          #
+          # which turns Secure Boot on unconditionally - the log line is "Booting
+          # Windows securely". The disk was installed without Secure Boot, so the
+          # firmware refuses its boot entry and falls through to the DVD.
+          #
+          # The completion marker avoids that branch entirely: hasCompletedInstall()
+          # is (hasSystemImage) or (hasData && hasBootMarker), and markWindowsBooted
+          # writes the marker with plain `touch`. With it present dockur treats the
+          # disk as an installed system and just starts it, on the same firmware
+          # settings it was installed with.
+          touch storage/boot
+          echo "created completion marker: $(ls -la storage/boot)"
+
           ls -la storage/
           qemu-img info storage/data.img || true
 
@@ -169,12 +190,15 @@ jobs:
       - name: boot it
         run: |
           set -x
-          # MANUAL=Y: a disk already exists, so dockur must boot it rather than
-          # install over it. NET_ADMIN gives a real bridge instead of the passt
-          # fallback, and /dev/net/tun is what the bridge needs.
+          # NO MANUAL=Y. The completion marker in storage/boot is what tells dockur
+          # the installation is finished; MANUAL would instead force Secure Boot on
+          # (install.sh sets BOOT_MODE=windows_secure for win11 under MANUAL), and
+          # this disk was installed without it.
+          # NET_ADMIN gives a real bridge instead of the passt fallback, and
+          # /dev/net/tun is what the bridge needs.
           docker run -d --name winverify \
             --device=/dev/kvm --device=/dev/net/tun --cap-add NET_ADMIN \
-            -e VERSION=11 -e MANUAL=Y -e DISK_SIZE=64G -e RAM_SIZE=8G -e CPU_CORES=4 \
+            -e VERSION=11 -e DISK_SIZE=64G -e RAM_SIZE=8G -e CPU_CORES=4 \
             -p 2222:2222 -p 8006:8006 \
             --stop-timeout 120 \
             -v "$GITHUB_WORKSPACE/storage:/storage" \
