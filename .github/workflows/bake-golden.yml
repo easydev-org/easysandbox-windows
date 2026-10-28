@@ -37,6 +37,13 @@ on:
 
 permissions:
   contents: read
+  actions: read
+  # checks: write is what lets log-stream create and update the check run it
+  # streams into. Without it the action answers
+  #   cannot create a check run (403): Resource not accessible by integration
+  # and carries on without streaming - measured on the macOS bake, where the
+  # missing permission was the first thing that went wrong.
+  checks: write
 
 jobs:
   bake:
@@ -82,8 +89,19 @@ jobs:
         run: sudo -E bash scripts/bake-golden.sh prepare
       - name: bake start container
         run: sudo -E bash scripts/bake-golden.sh start
+      # Streamed into a check run, because this step is up to 90 minutes long and
+      # GitHub publishes no log for a running job - /actions/jobs/{id}/logs is a
+      # redirect to a blob that only appears when the job ends, and answers
+      # 403/404 until then. A check run's output.text is readable immediately, so
+      # log-stream keeps it current from the script's own stdout and a reader can
+      # follow the install while it happens.
       - name: bake wait for install
-        run: sudo -E bash scripts/bake-golden.sh wait
+        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: bake-wait
+          interval: "20"
+          command: sudo -E bash scripts/bake-golden.sh wait
       # Ask the guest whether it will accept a login, while it is still running.
       # This is the whole point of the OEM payload: a disk that can be scripted
       # over ssh instead of clicked at.
