@@ -61,6 +61,21 @@ stage_prepare() {
   log "windows $VERSION -> $OUT"
   mkdir -p "$STORAGE" "$(dirname "$OUT")"
   claim_kvm
+
+  # Stage the OEM payload into the folder dockur reads.
+  #
+  # The payload lives in this repository (oem/install.bat) so it is reviewed and
+  # versioned with the rest of the bake, but dockur only looks inside its own
+  # container paths - /storage/oem among them. Copying here is what connects the
+  # two, and doing it in prepare means a missing or empty payload fails in seconds
+  # instead of after a ninety-minute install that quietly has no ssh.
+  local repo_oem="$(cd "$(dirname "$0")/.." && pwd)/oem"
+  if [ -d "$repo_oem" ]; then
+    mkdir -p "$STORAGE/oem"
+    cp -f "$repo_oem"/. "$STORAGE/oem"/ 2>/dev/null || cp -f "$repo_oem"/* "$STORAGE/oem"/
+    log "staged oem payload from $repo_oem"
+  fi
+  require_oem_ssh || return 1
   # Nothing to download here: dockur fetches its own ISO inside the container,
   # and pre-fetching would pin a URL that dockur chooses. This stage exists so
   # the KVM claim and the workspace check happen in a fast, visible step - if
@@ -83,6 +98,7 @@ stage_start() {
     -e "DISK_SIZE=$DISK_SIZE" \
     -e "RAM_SIZE=$RAM" \
     -e "CPU_CORES=$CPUS" \
+    -p 2222:22 \
     -v "$STORAGE:/storage" \
     dockurr/windows > /dev/null
   # "docker run -d" succeeding only means the container was CREATED. If its
@@ -104,6 +120,65 @@ stage_start() {
   first=$(docker logs "$NAME" 2>&1 | head -3 | tr "\n" " " || true)
   log "first container output: ${first}"
   log "start done"
+}
+
+require_oem_ssh() {
+  # The SSH setup rides in on dockur's OEM folder, which is an ordinary feature -
+  # /storage/oem is one of the four locations dockur looks in (install.sh,
+  # getOemFolder). If it is missing the install still succeeds and simply has no
+  # ssh, which is the failure this check exists to prevent: it would cost a full
+  # 90-minute bake to discover.
+  local bat="$STORAGE/oem/install.bat"
+  if [ ! -f "$bat" ]; then
+    log "ERROR: $bat is missing - the bake would produce a disk with no ssh"
+    return 1
+  fi
+  log "oem payload present: $(wc -l < "$bat") lines of $bat"
+}
+
+stage_ssh_check() {
+  # Ask the running guest whether it will accept a login.
+  #
+  # The container publishes 22 as 2222 on the host (docker run -p 2222:22), so this
+  # is an ordinary TCP check plus a real handshake. It runs right after wait, while
+  # the guest is still up, because that is the only moment the service can be asked.
+  #
+  # A closed port here means the OEM payload did not run or the capability install
+  # failed - both silent during the bake, and both fatal to every later step that
+  # wants to script the machine instead of clicking it.
+  local port="${SSH_PORT:-2222}"
+  local password="${PASSWORD:-admin}"
+  local user="${USERNAME:-docker}"
+  local i rc
+
+  log "checking ssh on 127.0.0.1:$port (user $user)"
+  for i in $(seq 1 20); do
+    if (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null; then
+      log "port $port is open after $((i*10))s"
+      break
+    fi
+    sleep 10
+    if [ "$i" = 20 ]; then
+      log "ERROR: port $port never opened - sshd is not running in the guest"
+      return 1
+    fi
+  done
+
+  if command -v sshpass >/dev/null 2>&1; then
+    sshpass -p "$password" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null       -o ConnectTimeout=15 -p "$port" "$user@127.0.0.1" 'echo SSH-OK; whoami' && return 0
+    log "ERROR: ssh handshake failed (password auth or account problem)"
+    return 1
+  fi
+
+  # No sshpass on the runner: prove the banner, which still separates 'sshd is
+  # listening' from 'something else holds the port'.
+  if (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null; then
+    head -c 40 <&3 > "$STATE/ssh-banner" 2>/dev/null || true
+    log "banner: $(cat "$STATE/ssh-banner" 2>/dev/null | tr -d "
+" | cut -c1-40)"
+  fi
+  log "sshpass is absent; listener confirmed, login not attempted"
+  return 0
 }
 
 stage_wait() {
@@ -253,7 +328,8 @@ case "$STAGE" in
   prepare) stage_prepare ;;
   start)   stage_prepare; stage_start ;;
   wait)    stage_wait ;;
+  ssh)     stage_ssh_check ;;
   extract) stage_extract ;;
-  all)     stage_prepare; stage_start; stage_wait; stage_extract ;;
-  *) echo "usage: $0 [prepare|start|wait|extract|all]"; exit 64 ;;
+  all)     stage_prepare; stage_start; stage_wait; stage_ssh_check; stage_extract ;;
+  *) echo "usage: $0 [prepare|start|wait|ssh|extract|all]"; exit 64 ;;
 esac

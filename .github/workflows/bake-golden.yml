@@ -61,7 +61,11 @@ jobs:
       - name: tooling
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-utils
+          # sshpass is what turns the ssh check from "the port is open" into "a
+          # login actually works". Keys would have to be generated and injected
+          # before the install, which the OEM payload does not do - the account has
+          # a password, so the check uses it.
+          sudo apt-get install -y -qq qemu-utils sshpass
           qemu-img --version | head -1
       - name: disk before
         run: df -h / "" || true
@@ -80,6 +84,11 @@ jobs:
         run: sudo -E bash scripts/bake-golden.sh start
       - name: bake wait for install
         run: sudo -E bash scripts/bake-golden.sh wait
+      # Ask the guest whether it will accept a login, while it is still running.
+      # This is the whole point of the OEM payload: a disk that can be scripted
+      # over ssh instead of clicked at.
+      - name: bake verify ssh
+        run: sudo -E bash scripts/bake-golden.sh ssh
       - name: bake extract disk
         run: sudo -E bash scripts/bake-golden.sh extract
       - name: debug container
