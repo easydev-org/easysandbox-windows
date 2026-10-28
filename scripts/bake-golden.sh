@@ -296,50 +296,49 @@ stage_wait() {
       # nothing listening. The container publishes 2222 and its forwarder completes
       # the handshake on its own; only a guest with sshd up sends "SSH-2.0-...".
       #
-      # So read the banner. Nothing but a running sshd in the guest can produce it.
-      log "waiting for OOBE to finish (a real SSH banner is the completion signal)"
-      local port="${SSH_PORT:-2222}"
-      local ready=0 waited=0 banner=""
-      while (( waited < 1200 )); do
-        # timeout is not optional here. The forwarder accepts the connection but
-        # sends nothing until a real sshd answers, so `head -c 64` blocks forever
-        # on an idle socket - and the previous version of this loop did exactly
-        # that: two heartbeats that should be 15s apart appeared 19 minutes apart,
-        # because each iteration hung on the read and only the sleep was counted.
-        # The 1200s budget would have taken many hours to expire.
-        banner=$(timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/$port && head -c 64 <&3" 2>/dev/null | tr -d '\r\n' || true)
-        case "$banner" in
-          SSH-*)
-            log "SSH banner from the guest after ${waited}s: ${banner}"
-            ready=1
-            break ;;
-        esac
+      # NO SSH SIGNAL. This bake produces a plain Windows install with no extra
+      # software, so nothing inside the guest will ever open a port and waiting for
+      # a banner can only time out - it did, for twenty minutes per run.
+      #
+      # What Setup looks like from outside is a disk that keeps growing and then
+      # stops: several GB written, a DROP as staging files are removed, then quiet.
+      # The drop is required before this counts as finished - watching one run,
+      # 22.8 GB at 600s fell to 20.3 GB at 720s, so "stopped growing" alone would
+      # fire during the cleanup, before Setup had actually finished.
+      log "waiting for Setup to settle (disk stops changing after its cleanup)"
+      local quiet=0 waited=0 last_size="" seen_drop=0 size=""
+      while (( waited < 1500 )); do
+        size=$(du -sm "$STORAGE" 2>/dev/null | awk '{print $1}')
+        : "${size:=0}"
+        if [ "$size" = "$last_size" ]; then
+          quiet=$(( quiet + 15 ))
+        else
+          if [ -n "$last_size" ] && [ "$size" -lt "$last_size" ]; then
+            seen_drop=1
+            log "disk shrank ${last_size} -> ${size} MiB (Setup cleaning up)"
+          fi
+          quiet=0
+          last_size="$size"
+        fi
+        if (( quiet >= 240 )) && (( seen_drop == 1 )); then
+          log "disk steady at ${size} MiB for ${quiet}s after cleanup - Setup finished"
+          break
+        fi
         sleep 15
         waited=$(( waited + 15 ))
         if (( waited % 120 == 0 )); then
-          log "still waiting for OOBE: ${waited}s, storage=$(du -m "$STORAGE" 2>/dev/null | awk '{print $1}')MiB, port said: ${banner:-<nothing>}"
+          log "settling: ${waited}s, ${size}MiB, quiet=${quiet}s, shrank=${seen_drop}"
         fi
       done
-      if (( ready == 0 )); then
-        log "ERROR: no SSH banner within 1200s - the OEM script did not run or failed"
-        log "container tail:"; docker logs --tail 40 "$NAME" 2>&1 || true
-        return 1
+      if (( waited >= 1500 )); then
+        log "NOTE: 1500s cap reached without a clean settle; keeping the disk anyway"
       fi
+      local port="${SSH_PORT:-2222}"
 
       # Log in HERE, while the guest is up. The old order ran the login check after
-      # the container was stopped, so it could only ever fail - and it did, every
-      # time, which is why "verify ssh" never established anything.
-      if command -v sshpass >/dev/null 2>&1; then
-        if sshpass -p "$WIN_PASS" ssh -o StrictHostKeyChecking=no \
-             -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 \
-             -p "$port" "$WIN_USER@127.0.0.1" 'echo SSH-OK; whoami'; then
-          log "login as $WIN_USER succeeded"
-        else
-          log "WARNING: banner seen but login as $WIN_USER failed - the account may not be what we asked for"
-        fi
-      else
-        log "sshpass absent; banner proved sshd is running but login was not attempted"
-      fi
+      # No login check. There is no sshd on this disk by design; ssh is added by
+      # booting the finished image, where a failed attempt costs minutes instead of
+      # forcing another full install.
       log "stopping the guest so dockur records its boot marker"
       # docker stop sends ACPI shutdown; finish() then runs markWindowsBooted and
       # writes $STORAGE/boot. Give it room: Windows takes a while to shut down.
