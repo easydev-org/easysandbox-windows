@@ -321,7 +321,11 @@ stage_wait() {
       # oobe, language, desktop or unknown.
       log "waiting for the guest to reach a desktop (watching the screen)"
       local waited=0 stage="unknown" stable=0
-      SHOT_DIR="${SHOT_DIR:-$STORAGE/screenshots}"
+      # Screenshots go beside the workspace, not inside STORAGE: the workflow
+      # uploads ${PWD}/screenshots, and writing into STORAGE would also inflate the
+      # disk-size readings. These frames are the evidence for the verdict below, so
+      # they have to survive the run.
+      SHOT_DIR="${SHOT_DIR:-$PWD/screenshots}"
       mkdir -p "$SHOT_DIR"
       while (( waited < 4200 )); do
         if stage_screenshot >/dev/null 2>&1; then
