@@ -1,0 +1,121 @@
+name: screen-sample
+
+# Sample the guest's screen over time and upload every frame.
+#
+# WHY. The bake's wait loop classifies each frame, but when the classifier answers
+# 'unknown' the frames themselves are the only way to find out what was actually on
+# screen. Getting them out of a long run is awkward: the wait step owns the container
+# and a cancel can skip the upload steps entirely.
+#
+# This workflow does nothing else. It boots a disk, screenshots on a fixed interval,
+# and uploads everything - so the classifier can be corrected from evidence instead
+# of from another guess.
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_run:
+        description: "Run id holding the golden-windows artifact (blank = fresh install)"
+        required: false
+        default: ""
+      shots:
+        description: "How many screenshots"
+        required: false
+        default: "8"
+      interval:
+        description: "Seconds between screenshots"
+        required: false
+        default: "90"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  sample:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-utils tesseract-ocr
+          tesseract --version | head -1
+
+      - name: free disk space
+        run: |
+          set -x
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af || true
+
+      - uses: actions/download-artifact@v4
+        if: github.event.inputs.artifact_run != ''
+        with:
+          name: golden-windows
+          path: artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.inputs.artifact_run }}
+
+      - name: place the disk
+        run: |
+          set -x
+          mkdir -p storage
+          disk=$(find artifact -type f -size +1G 2>/dev/null | head -1 || true)
+          if [ -n "$disk" ]; then
+            qemu-img convert -O raw "$disk" storage/data.img
+            state=$(find artifact -name '*.bootstate.tar.gz' | head -1 || true)
+            [ -n "$state" ] && tar xzf "$state" -C storage
+            touch storage/boot
+          fi
+          ls -la storage/
+
+      - name: boot
+        run: |
+          set -x
+          docker run -d --name sampler \
+            --device=/dev/kvm --device=/dev/net/tun --cap-add NET_ADMIN \
+            -e VERSION=11 -e DISK_SIZE=64G -e RAM_SIZE=8G -e CPU_CORES=4 \
+            -v "$GITHUB_WORKSPACE/storage:/storage" \
+            dockurr/windows
+          sleep 30
+          docker logs --tail 20 sampler || true
+
+      - name: sample the screen
+        run: |
+          set -x
+          mkdir -p shots
+          docker cp scripts/shotsock.py sampler:/tmp/shotsock.py
+          n="${{ github.event.inputs.shots }}"
+          gap="${{ github.event.inputs.interval }}"
+          for i in $(seq 1 "$n"); do
+            if ! docker ps --format '{{.Names}}' | grep -qx sampler; then
+              echo "container gone before shot $i"; break
+            fi
+            docker exec sampler python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/s$i.ppm 2>&1 | tail -2 || true
+            docker cp "sampler:/tmp/s$i.ppm" "shots/s$i.ppm" 2>/dev/null || true
+            if [ -s "shots/s$i.ppm" ]; then
+              verdict=$(python3 scripts/screen-read.py "shots/s$i.ppm" --verbose 2>&1 || echo "?")
+              echo "shot $i: $verdict"
+              python3 scripts/ppm2png.py "shots/s$i.ppm" "shots/s$i.png" >/dev/null 2>&1 || true
+            else
+              echo "shot $i: no framebuffer"
+            fi
+            sleep "$gap"
+          done
+          ls -la shots/ || true
+          docker logs --tail 60 sampler || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screen-samples
+          path: shots/**
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: stop
+        if: always()
+        run: docker rm -f sampler || true
