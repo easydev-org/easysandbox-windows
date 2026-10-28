@@ -1,0 +1,98 @@
+name: inspect-qemu-cmdline
+
+# Print the QEMU command dockur actually launches during installation.
+#
+# WHY. setup.img - a 64 MiB FAT32 volume labelled SETUP - contains a correct
+# Autounattend.xml at its root, and Windows Setup still stops on "Select language
+# settings". The answer file is present but not being honoured, so the question is
+# mechanical: is setup.img attached to the guest at all, and if so how?
+#
+# Nothing in dockur's own source attaches it - createSetupImage writes the file and
+# the rest lives in the qemux/qemu base layer's config.sh, which is not in the
+# repository. So the running process is the only honest source: /proc/<qemu>/cmdline
+# is the exact argument list, and it says definitively whether setup.img, and which
+# kind of device, reaches the guest.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Windows version dockur should prepare"
+        required: false
+        default: "11"
+      wait:
+        description: "Seconds to wait for the QEMU process to start"
+        required: false
+        default: "180"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  cmdline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-utils
+
+      - name: free disk space
+        run: |
+          set -x
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af || true
+
+      - name: start dockur
+        run: |
+          set -x
+          mkdir -p storage
+          docker run -d --name qcmd \
+            --device=/dev/kvm --device=/dev/net/tun --cap-add NET_ADMIN \
+            -e VERSION=${{ github.event.inputs.version }} \
+            -e DISK_SIZE=64G -e RAM_SIZE=8G -e CPU_CORES=4 \
+            -v "$GITHUB_WORKSPACE/storage:/storage" \
+            dockurr/windows
+          sleep "${{ github.event.inputs.wait }}"
+          docker ps -a
+          docker logs --tail 20 qcmd || true
+
+      - name: the exact QEMU arguments
+        run: |
+          set -x
+          echo "=== storage ==="
+          ls -la storage/ || true
+
+          echo
+          echo "=== qemu command line, one argument per line ==="
+          docker exec qcmd sh -c '
+            pid=$(pgrep -f qemu-system | head -1)
+            echo "pid=$pid"
+            [ -n "$pid" ] || exit 0
+            tr "\0" "\n" < /proc/$pid/cmdline' 2>&1 | sed 's/^/  /' || true
+
+          echo
+          echo "=== arguments mentioning the answer-file device ==="
+          # setup.img has to reach the guest as SOME kind of device for Windows to
+          # read it. -drive/-device/-fw_cfg/-chardev are the possibilities.
+          docker exec qcmd sh -c '
+            pid=$(pgrep -f qemu-system | head -1)
+            [ -n "$pid" ] || exit 0
+            tr "\0" "\n" < /proc/$pid/cmdline' 2>/dev/null \
+            | grep -nE "setup|\.img|floppy|virtio|fw_cfg|drive|device" | sed 's/^/  /' || true
+
+          echo
+          echo "=== is setup.img open by the qemu process? ==="
+          docker exec qcmd sh -c '
+            pid=$(pgrep -f qemu-system | head -1)
+            [ -n "$pid" ] || exit 0
+            ls -l /proc/$pid/fd 2>/dev/null | grep -iE "setup|storage"' 2>&1 | sed 's/^/  /' || true
+
+      - name: stop
+        if: always()
+        run: docker rm -f qcmd || true
