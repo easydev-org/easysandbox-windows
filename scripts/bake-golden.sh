@@ -302,47 +302,57 @@ stage_wait() {
       #
       # What Setup looks like from outside is a disk that keeps growing and then
       # stops: several GB written, a DROP as staging files are removed, then quiet.
-      # The drop is required before this counts as finished - watching one run,
-      # 22.8 GB at 600s fell to 20.3 GB at 720s, so "stopped growing" alone would
-      # fire during the cleanup, before Setup had actually finished.
-      log "waiting for Setup to settle (disk stops changing after its cleanup)"
-      local quiet=0 waited=0 last_size="" seen_drop=0 size=""
-      while (( waited < 1500 )); do
-        size=$(du -sm "$STORAGE" 2>/dev/null | awk '{print $1}')
-        : "${size:=0}"
-        # A TOLERANCE, because byte-equality never happens. Windows keeps writing
-        # logs, event files and registry hives while it sits idle, so du wobbles by
-        # a few MiB forever - measured on this bake: 19561, 19562, 19565, 19569,
-        # 19572, with the quiet counter resetting to 0 every time so the 240s target
-        # was unreachable. Anything inside 50 MiB is idle noise; a real install step
-        # moves hundreds of MiB between samples.
-        local delta=0
-        if [ -n "$last_size" ]; then
-          delta=$(( size - last_size ))
-          (( delta < 0 )) && delta=$(( -delta ))
-        fi
-        if [ -n "$last_size" ] && (( delta <= 50 )); then
-          quiet=$(( quiet + 15 ))
-        else
-          if [ -n "$last_size" ] && [ "$size" -lt "$last_size" ]; then
-            seen_drop=1
-            log "disk shrank ${last_size} -> ${size} MiB (Setup cleaning up)"
+      # WATCH THE SCREEN, NOT THE DISK.
+      #
+      # Every size-based rule I tried declared "finished" while Setup was still
+      # working, and each bake then exported a half-installed disk:
+      #
+      #   "disk stopped growing"       fired during Setup's own pauses
+      #   "shrank, then held steady"   fired during the cleanup between stages
+      #   "byte-identical for 240s"    never fired at all - idle Windows writes
+      #                                logs, so du always wobbles a few MiB
+      #
+      # A Windows install shows its own progress on screen: "Installing Windows 11
+      # - 84% complete", then "Installing 42% - Please keep your computer on", and
+      # when it is really done there is a taskbar. That is not an inference, it is
+      # the product of the thing being measured, so it is what this waits on.
+      #
+      # screen-read.py OCRs the framebuffer and answers with one word: installing,
+      # oobe, language, desktop or unknown.
+      log "waiting for the guest to reach a desktop (watching the screen)"
+      local waited=0 stage="unknown" stable=0
+      SHOT_DIR="${SHOT_DIR:-$STORAGE/screenshots}"
+      mkdir -p "$SHOT_DIR"
+      while (( waited < 4200 )); do
+        if stage_screenshot >/dev/null 2>&1; then
+          latest=$(ls -1t "$SHOT_DIR"/*.ppm 2>/dev/null | head -1)
+          if [ -n "$latest" ]; then
+            stage=$(python3 "$(dirname "$0")/screen-read.py" "$latest" 2>>"$SHOT_DIR/ocr.log" || echo unknown)
+            log "screen at ${waited}s: ${stage}"
+            if [ "$stage" = "desktop" ]; then
+              log "desktop is up after ${waited}s - installation finished"
+              break
+            fi
+            # 'language' means the answer file was not honoured; nothing will
+            # change by waiting, so say so rather than burning the budget.
+            if [ "$stage" = "language" ]; then
+              stable=$(( stable + 1 ))
+              if (( stable >= 3 )); then
+                log "ERROR: Setup is stuck on the language page - the answer file is not being read"
+                break
+              fi
+            else
+              stable=0
+            fi
           fi
-          quiet=0
+        else
+          log "screendump unavailable at ${waited}s"
         fi
-        last_size="$size"
-        if (( quiet >= 240 )) && (( seen_drop == 1 )); then
-          log "disk steady at ${size} MiB for ${quiet}s after cleanup - Setup finished"
-          break
-        fi
-        sleep 15
-        waited=$(( waited + 15 ))
-        if (( waited % 120 == 0 )); then
-          log "settling: ${waited}s, ${size}MiB, quiet=${quiet}s, shrank=${seen_drop}"
-        fi
+        sleep 60
+        waited=$(( waited + 60 ))
       done
-      if (( waited >= 1500 )); then
-        log "NOTE: 1500s cap reached without a clean settle; keeping the disk anyway"
+      if [ "$stage" != "desktop" ]; then
+        log "NOTE: did not see a desktop (last stage: ${stage}); keeping the disk anyway"
       fi
       local port="${SSH_PORT:-2222}"
 

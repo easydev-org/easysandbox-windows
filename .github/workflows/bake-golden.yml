@@ -72,7 +72,9 @@ jobs:
           # login actually works". Keys would have to be generated and injected
           # before the install, which the OEM payload does not do - the account has
           # a password, so the check uses it.
-          sudo apt-get install -y -qq qemu-utils sshpass
+          # tesseract reads the framebuffer dump, so the wait stage can tell
+          # 'Installing Windows 11 - 84%' from a desktop. Disk size could not.
+          sudo apt-get install -y -qq qemu-utils sshpass tesseract-ocr
           qemu-img --version | head -1
       - name: disk before
         run: df -h / "" || true
