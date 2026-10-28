@@ -87,8 +87,17 @@ jobs:
           df -h / "" || true
       - name: bake prepare
         run: sudo -E bash scripts/bake-golden.sh prepare
+      # Streamed too, not just the long wait. This step is where a bad docker run
+      # dies, and it died there twice with no readable log: the failure was a syntax
+      # error in the continuation, invisible until the arguments it lost were
+      # counted. Streaming makes that immediate.
       - name: bake start container
-        run: sudo -E bash scripts/bake-golden.sh start
+        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: bake-start
+          interval: "10"
+          command: sudo -E bash scripts/bake-golden.sh start
       # Streamed into a check run, because this step is up to 90 minutes long and
       # GitHub publishes no log for a running job - /actions/jobs/{id}/logs is a
       # redirect to a blob that only appears when the job ends, and answers

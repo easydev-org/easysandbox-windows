@@ -92,23 +92,26 @@ stage_start() {
   #
   # No AUTO_UNATTEND variable exists - unattended is the default and MANUAL is
   # the escape hatch forced on only when an answer file is missing.
+  # Port choice, and why the whole chain is 2222:
+  #
+  #   host 2222 -> container 2222 -> guest 2222
+  #
+  # The qemux/qemu base layer forwards a published container port to the guest
+  # port of the SAME number - that is why dockur's readme publishes RDP as
+  # 3389:3389. The host side cannot be 22 (privileged, docker refuses it for a
+  # non-root user), so the number has to be 2222 on all three hops and the OEM
+  # script sets sshd's Port to 2222 to match.
+  #
+  # NOTE: no comments inside the continuation below. A '#' after a trailing
+  # backslash ends the command instead of the line, which is what broke this step
+  # twice: docker run lost half its arguments and exited in under a second, before
+  # any install had started.
   docker run -d --name "$NAME" \
     --device=/dev/kvm \
     -e "VERSION=$VERSION" \
     -e "DISK_SIZE=$DISK_SIZE" \
     -e "RAM_SIZE=$RAM" \
     -e "CPU_CORES=$CPUS" \
-    # Container port and guest port must be the SAME number: the qemux/qemu base
-    # layer DNATs a published container port straight through to the guest's port of
-    # equal number. That is exactly how dockur's own readme publishes RDP - 3389:3389,
-    # not 3389:3389-to-something-else - and publishing 2222:22 forwards to guest port
-    # 2222, where nothing listens. Measured: the check timed out its full 200s.
-    # Host 2222 -> container 2222 -> guest 2222, all the same number because the base
-    # layer forwards a published port to the guest port of equal number. 22 on the
-    # host side is a privileged port and docker refuses it for a non-root user, which
-    # is what killed the previous attempt in under a second.
-    #
-    # Guest sshd therefore has to listen on 2222 as well; the OEM script sets that.
     -p 2222:2222 \
     -v "$STORAGE:/storage" \
     dockurr/windows > /dev/null
@@ -196,8 +199,7 @@ stage_ssh_check() {
   # listening' from 'something else holds the port'.
   if (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null; then
     head -c 40 <&3 > "$STATE/ssh-banner" 2>/dev/null || true
-    log "banner: $(cat "$STATE/ssh-banner" 2>/dev/null | tr -d "
-" | cut -c1-40)"
+    log "banner: $(tr -d '\r' < "$STATE/ssh-banner" 2>/dev/null | cut -c1-40)"
   fi
   log "sshpass is absent; listener confirmed, login not attempted"
   return 0
