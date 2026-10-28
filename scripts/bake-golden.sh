@@ -141,7 +141,10 @@ stage_start() {
   log "port mappings as docker sees them:"
   docker port "$NAME" 2>&1 | sed 's/^/    /' || true
   log "qemu network arguments:"
-  docker exec "$NAME" sh -c "ps -ef | grep -o 'netdev [^ ]*' | head -5" 2>&1 | sed 's/^/    /' || true
+  # Split on spaces and keep the pieces that name the forwarding. The first
+  # attempt grepped for 'netdev [^ ]*' through sh, where the bracket expression
+  # was mangled and every line came back as "netdev [^" - useless.
+  docker exec "$NAME" sh -c "ps -ef | tr ' ' '\n' | grep -E '^(hostfwd|netdev|user,id)' | head -8" 2>&1 | sed 's/^/    /' || true
 
   log "start done"
 }
