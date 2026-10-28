@@ -71,13 +71,21 @@ jobs:
           [ -n "$disk" ] || { echo "no large disk in the artifact"; find artifact | head; exit 1; }
           ls -la "$disk"
 
-          # dockur's layout is /storage/<version>/data.img. The artifact holds a
-          # qcow2, which is what data.img can be - dockur passes it to qemu as-is.
-          mkdir -p storage/11
-          sudo cp --sparse=always "$disk" storage/11/data.img
-          sudo chmod a+r storage/11/data.img
-          ls -la storage/11/
-          qemu-img info storage/11/data.img || true
+          # /storage/data.img - NOT /storage/<version>/data.img.
+          #
+          # This is where the previous run went wrong, and it invalidated the whole
+          # check: the disk was placed at storage/11/data.img, dockur looked for
+          # storage/data.img, found nothing, and booted its installation ISO against
+          # an empty disk. Windows Setup then sat on "Select language settings",
+          # which is exactly what a fresh install looks like - and I read that as
+          # proof the golden disk was broken.
+          #
+          # Confirmed from the bake's own QEMU arguments:
+          #   -drive file=/storage/data.img,id=data3,...
+          sudo cp --sparse=always "$disk" storage/data.img
+          sudo chmod a+r storage/data.img
+          ls -la storage/
+          qemu-img info storage/data.img || true
 
       # Read the disk before booting it. Whether Windows finished installing is
       # recorded in the filesystem: a completed install has a large Windows
@@ -91,17 +99,23 @@ jobs:
           sudo apt-get install -y -qq libguestfs-tools >/dev/null 2>&1 || true
           # virt-filesystems/virt-ls read the qcow2 without booting anything.
           if command -v virt-ls >/dev/null 2>&1; then
-            sudo virt-filesystems -a storage/11/data.img --all --long -h || true
-            echo "=== top level ==="
-            sudo virt-ls -a storage/11/data.img -m /dev/sda4 / 2>/dev/null | head -40 \
-              || sudo virt-ls -a storage/11/data.img -m /dev/sda3 / 2>/dev/null | head -40 \
-              || true
-            echo "=== staging trees (present => install did not finish) ==="
-            sudo virt-ls -a storage/11/data.img -m /dev/sda4 / 2>/dev/null | grep -E 'WINDOWS\.~|Windows|Users|Program' || true
+            sudo virt-filesystems -a storage/data.img --all --long -h || true
+            echo "=== top level of the 63G Windows volume (sda3) ==="
+            # sda3 is the system volume; sda4 is the 784 MB WinRE partition and
+            # only ever contains Recovery. The first version of this step listed
+            # sda4 and `||`'d over to sda3, so sda3 was never read when sda4
+            # succeeded - and "only Recovery" was then reported as "the disk is
+            # empty", which was wrong.
+            sudo virt-ls -a storage/data.img -m /dev/sda3 / 2>/dev/null | head -40 || true
+            echo "=== does the system volume look installed? ==="
+            sudo virt-ls -a storage/data.img -m /dev/sda3 / 2>/dev/null \
+              | grep -E 'Windows|Users|Program Files|WINDOWS\.~' || echo "   (no Windows/Users/Program Files)"
+            echo "=== user profiles ==="
+            sudo virt-ls -a storage/data.img -m /dev/sda3 /Users 2>/dev/null | head -20 || true
           else
             echo "virt-ls unavailable; falling back to qemu-nbd"
             sudo modprobe nbd max_part=16 || true
-            sudo qemu-nbd -c /dev/nbd0 storage/11/data.img || true
+            sudo qemu-nbd -c /dev/nbd0 storage/data.img || true
             sleep 3
             lsblk /dev/nbd0 || true
             sudo partx -a /dev/nbd0 2>/dev/null || true
@@ -129,7 +143,8 @@ jobs:
           docker run -d --name winverify \
             --device=/dev/kvm --device=/dev/net/tun --cap-add NET_ADMIN \
             -e VERSION=11 -e MANUAL=Y -e DISK_SIZE=64G -e RAM_SIZE=8G -e CPU_CORES=4 \
-            -p 2222:2222 \
+            -p 2222:2222 -p 8006:8006 \
+            --stop-timeout 120 \
             -v "$GITHUB_WORKSPACE/storage:/storage" \
             dockurr/windows
           sleep 30
