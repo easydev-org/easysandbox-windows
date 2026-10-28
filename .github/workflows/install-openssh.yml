@@ -1,0 +1,174 @@
+name: install-openssh
+
+# Add OpenSSH Server to a finished golden disk, by typing into the guest.
+#
+# WHY WINGET AND NOT THE WINDOWS CAPABILITY.
+#
+# The obvious route is `Add-WindowsCapability -Name OpenSSH.Server~~~~0.0.1.0`, and an
+# earlier version of this pipeline did exactly that. It has two problems here: the
+# capability payload is fetched from Windows Update, which makes it dependent on the
+# guest reaching Microsoft through QEMU's user-mode network, and it installs Microsoft's
+# older inbox build. The instruction for this step is winget, which pulls the current
+# PowerShell/Win32-OpenSSH release from GitHub - the same one upstream maintains.
+#
+# HOW THE COMMANDS GET IN.
+#
+# There is no agent, no shared folder and no network service in a freshly installed
+# guest, so the only channel is the console: QEMU's HMP `sendkey`, the same mechanism
+# the macOS driver uses to click its Setup Assistant. guest-type.py maps text to key
+# names and types it.
+#
+# Win+R opens the Run box, which accepts typing immediately - unlike the Start menu
+# search, which needs the shell to have finished loading its index.
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_run:
+        description: "Run id holding the golden-windows artifact"
+        required: true
+        default: "40746509253"
+      boot_wait:
+        description: "Seconds to let Windows reach the desktop before typing"
+        required: false
+        default: "300"
+      port:
+        description: "sshd port inside the guest (also the forwarded host port)"
+        required: false
+        default: "2222"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-utils tesseract-ocr
+
+      - name: free disk space
+        run: |
+          set -x
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af || true
+          df -h / | tail -1
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: golden-windows
+          path: artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.inputs.artifact_run }}
+
+      - name: place the disk
+        run: |
+          set -x
+          mkdir -p storage
+          disk=$(find artifact -type f -size +1G | head -1)
+          [ -n "$disk" ] || { echo "no disk in the artifact"; exit 1; }
+          # QEMU opens /storage/data.img as raw, so the qcow2 export must be converted.
+          qemu-img convert -O raw "$disk" storage/data.img
+          chmod a+r storage/data.img
+
+          state=$(find artifact -name '*.bootstate.tar.gz' | head -1)
+          if [ -n "$state" ]; then
+            tar xzf "$state" -C storage
+            echo "restored boot state: $(tar tzf "$state" | tr '\n' ' ')"
+          fi
+
+          # The completion marker tells dockur the install is finished, so it boots the
+          # disk instead of falling into its install path - which would also force
+          # Secure Boot on and the firmware would then refuse this disk's boot entry.
+          touch storage/boot
+          ls -la storage/
+
+      - name: boot it
+        run: |
+          set -x
+          docker run -d --name sshinst \
+            --device=/dev/kvm --device=/dev/net/tun --cap-add NET_ADMIN \
+            -e VERSION=11 -e DISK_SIZE=64G -e RAM_SIZE=8G -e CPU_CORES=4 \
+            -p ${{ github.event.inputs.port }}:${{ github.event.inputs.port }} \
+            -p 8006:8006 --stop-timeout 180 \
+            -v "$GITHUB_WORKSPACE/storage:/storage" \
+            dockurr/windows
+          sleep 30
+          docker ps -a
+          docker logs --tail 30 sshinst || true
+
+      - name: wait for the desktop
+        run: |
+          set -x
+          mkdir -p shots
+          docker cp scripts/shotsock.py sshinst:/tmp/shotsock.py
+          docker cp scripts/guest-type.py sshinst:/tmp/guest-type.py
+          waited=0
+          limit=${{ github.event.inputs.boot_wait }}
+          stage=""
+          while [ "$waited" -lt "$limit" ]; do
+            docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/b.ppm >/dev/null 2>&1 || true
+            docker cp sshinst:/tmp/b.ppm shots/boot.ppm >/dev/null 2>&1 || true
+            if [ -s shots/boot.ppm ]; then
+              stage=$(python3 scripts/screen-read.py shots/boot.ppm 2>/dev/null || echo unknown)
+            fi
+            echo "t=${waited}s stage=${stage}"
+            [ "$stage" = "desktop" ] && break
+            sleep 20
+            waited=$((waited + 20))
+          done
+          python3 scripts/ppm2png.py shots/boot.ppm shots/boot.png >/dev/null 2>&1 || true
+          [ "$stage" = "desktop" ] || { echo "never reached a desktop"; docker logs --tail 40 sshinst || true; exit 1; }
+          echo "desktop reached after ${waited}s"
+          # Windows needs a moment after the shell appears before Run will take focus.
+          sleep 20
+
+      - name: open PowerShell via Run
+        run: |
+          set -x
+          # Win+R, then "powershell", then Enter. The Run box takes keystrokes as soon
+          # as it is up, and PowerShell starts in the user's context - which is the
+          # docker account, an administrator.
+          docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock --raw "sendkey meta_l-r"
+          sleep 3
+          docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock "powershell" --enter
+          sleep 15
+          docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/ps.ppm >/dev/null 2>&1 || true
+          docker cp sshinst:/tmp/ps.ppm shots/ps.ppm >/dev/null 2>&1 || true
+          python3 scripts/ppm2png.py shots/ps.ppm shots/ps.png >/dev/null 2>&1 || true
+          ls -la shots/
+
+      - name: winget install OpenSSH Server
+        run: |
+          set -x
+          port=${{ github.event.inputs.port }}
+          # winget needs the App Installer package and a working source. --accept-*
+          # suppresses the interactive prompts, which cannot be answered by keystrokes
+          # reliably.
+          cmd1="winget install --id Microsoft.OpenSSH.Beta --exact --accept-source-agreements --accept-package-agreements --silent"
+          echo "typing: $cmd1"
+          docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock "$cmd1" --enter
+          echo "waiting for winget (up to 6 minutes)"
+          sleep 360
+          docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/w1.ppm >/dev/null 2>&1 || true
+          docker cp sshinst:/tmp/w1.ppm shots/winget.ppm >/dev/null 2>&1 || true
+          python3 scripts/ppm2png.py shots/winget.ppm shots/winget.png >/dev/null 2>&1 || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: openssh-shots
+          path: shots/**
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: stop
+        if: always()
+        run: docker rm -f sshinst || true
