@@ -266,6 +266,8 @@ stage_wait() {
   WINDOWS_BOOTED='BdsDxe: starting Boot[[:xdigit:]]{4} "Windows Boot Manager" from .*HD\('
   deadline=$(( SECONDS + WAIT ))
   last_beat=0
+  stalled=0
+  last_used=""
   while (( SECONDS < deadline )); do
     # Success: the guest is booting from the installed disk.
     if docker logs "$NAME" 2>&1 | grep -qE "$WINDOWS_BOOTED"; then
@@ -344,6 +346,29 @@ stage_wait() {
       iso=$(ls -1 "$STORAGE"/*.iso 2>/dev/null | head -1 || true)
       tail_line=$(docker logs --tail 1 "$NAME" 2>&1 | tr -d "\r" | cut -c1-80 || true)
       log "${SECONDS}s  storage_used=${used}MiB iso=$(basename "${iso:-none}")  dockur: $tail_line"
+
+      # Stall detection. A Windows install grows the disk in bursts, so a pause is
+      # normal - but 600s of identical du means something is wrong, and the last run
+      # sat there for over 1000s with a heartbeat that only repeated the same number.
+      # That told us nothing about WHY, so past the threshold this starts printing
+      # the guest's state instead of just its size.
+      if [ "$used" = "${last_used:-}" ]; then
+        stalled=$(( ${stalled:-0} + 30 ))
+      else
+        stalled=0
+      fi
+      last_used="$used"
+
+      if (( stalled >= 600 )); then
+        log "STALLED ${stalled}s at ${used}MiB; inspecting the guest"
+        log "  qemu alive: $(docker exec "$NAME" sh -c 'ps -ef | grep -c [q]emu-system' 2>&1 | tr -d '\r' || echo '?')"
+        log "  disks: $(docker exec "$NAME" sh -c 'ls -la /storage/*.img 2>/dev/null | awk "{print \$5, \$9}"' 2>&1 | tr -d '\r' | tr '\n' ' ' || echo '?')"
+        log "  dockur tail:"
+        docker logs --tail 8 "$NAME" 2>&1 | tr -d "\r" | sed 's/^/      /' || true
+        # Force-capture a screendump, which is the only view of the guest itself
+        # when the serial console has gone quiet.
+        docker exec "$NAME" sh -c 'wget -qO- "http://127.0.0.1:8006/snapshot" >/dev/null 2>&1' || true
+      fi
     fi
     sleep 20
   done
