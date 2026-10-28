@@ -523,8 +523,17 @@ stage_extract() {
 
   log "extracting $SRC"
   ls -la "$SRC"
+  # qcow2 is the right archive format - one file, compact, sparse. But it is NOT
+  # what dockur boots: QEMU gets "-drive file=/storage/data.img,...,format=raw"
+  # because dockur creates that file as a raw image. Anything that puts this export
+  # back in front of QEMU must convert it to raw first, or QEMU reads qcow2 metadata
+  # as a partition table, finds no disk, and silently boots the installation ISO
+  # instead. That failure looks exactly like a broken golden disk and cost several
+  # runs to identify, so the artifact name says which format it is.
   qemu-img convert -O qcow2 "$SRC" "$OUT"
   qemu-img info "$OUT" | head -6
+  log "NOTE: $OUT is qcow2. Convert with 'qemu-img convert -O raw' before booting it"
+  log "      with dockur, which uses format=raw for /storage/data.img."
   docker rm -f "$NAME" >/dev/null 2>&1 || true
   log "BAKED windows $VERSION -> $OUT"
 }

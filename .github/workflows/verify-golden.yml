@@ -82,8 +82,21 @@ jobs:
           #
           # Confirmed from the bake's own QEMU arguments:
           #   -drive file=/storage/data.img,id=data3,...
+          #
+          # AND IT MUST BE RAW. dockur passes the disk to QEMU as
+          #   -drive file=/storage/data.img,...,format=raw
+          # because it creates that file itself ("Creating a 64 GB growable disk
+          # image in raw format"). The bake's extract step then converts it to qcow2
+          # for the artifact, so copying that qcow2 straight back here meant QEMU
+          # read qcow2 metadata as if it were a partition table, found no disk, and
+          # fell back to booting the installation ISO - which is exactly the
+          # "Select language settings" screen that looked like a broken golden disk.
+          #
+          # virt-ls read the same file correctly because it honours the format, so
+          # the disk itself was always fine. Converting back to raw is what makes
+          # QEMU see it.
           mkdir -p storage
-          sudo cp --sparse=always "$disk" storage/data.img
+          qemu-img convert -O raw "$disk" storage/data.img
           sudo chmod a+r storage/data.img
           ls -la storage/
           qemu-img info storage/data.img || true
