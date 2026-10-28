@@ -433,12 +433,19 @@ stage_screenshot() {
   log "locating the QEMU monitor socket"
   local sock
   sock=$(docker exec "$NAME" sh -c '
-      for d in /run /var/run /tmp /storage; do
-        find "$d" -maxdepth 3 -name "monitor.sock" 2>/dev/null
-      done | head -1' 2>/dev/null | tr -d "\r")
+      # Search the whole filesystem, not a guessed list of directories. The first
+      # attempt looked only in /run /var/run /tmp /storage at depth 3 and found
+      # nothing, because dockur keeps its sockets under $QEMU_DIR, which the
+      # qemux/qemu base layer sets in a file that is not in dockur's source.
+      # QEMU_DIR itself is knowable from the running process, so ask it directly.
+      for pid in $(pgrep -f qemu-system 2>/dev/null); do
+        tr "\0" "\n" < /proc/$pid/environ 2>/dev/null | grep -E "^QEMU_DIR=" || true
+      done | head -1
+      find / -maxdepth 4 -name "monitor.sock" -type s 2>/dev/null | head -1' 2>/dev/null | tr -d "\r" | grep -v "^$")
   if [ -z "$sock" ]; then
     log "no monitor.sock in the container; cannot screendump"
-    docker exec "$NAME" sh -c 'ls -la /run 2>/dev/null | head' || true
+    log "  sockets the container does have:"
+    docker exec "$NAME" sh -c 'find / -maxdepth 4 -type s 2>/dev/null | head -12' 2>&1 | tr -d "\r" | sed 's/^/    /' || true
     return 1
   fi
   log "monitor socket: $sock"

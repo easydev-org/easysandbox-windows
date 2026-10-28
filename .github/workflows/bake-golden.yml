@@ -118,7 +118,7 @@ jobs:
         if: always()
         run: |
           mkdir -p screenshots
-          sudo SHOT_DIR="$PWD/screenshots" -E bash scripts/bake-golden.sh shot || true
+          sudo SHOT_DIR="$PWD/screenshots" -E bash scripts/bake-golden.sh shot
           sudo chown -R "$(id -u):$(id -g)" screenshots || true
           ls -la screenshots || true
       # Runs even when wait failed. A disk that reached a desktop but whose ssh did
