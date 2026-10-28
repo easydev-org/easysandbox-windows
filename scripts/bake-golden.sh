@@ -98,7 +98,12 @@ stage_start() {
     -e "DISK_SIZE=$DISK_SIZE" \
     -e "RAM_SIZE=$RAM" \
     -e "CPU_CORES=$CPUS" \
-    -p 2222:22 \
+    # Container port and guest port must be the SAME number: the qemux/qemu base
+    # layer DNATs a published container port straight through to the guest's port of
+    # equal number. That is exactly how dockur's own readme publishes RDP - 3389:3389,
+    # not 3389:3389-to-something-else - and publishing 2222:22 forwards to guest port
+    # 2222, where nothing listens. Measured: the check timed out its full 200s.
+    -p 22:22 \
     -v "$STORAGE:/storage" \
     dockurr/windows > /dev/null
   # "docker run -d" succeeding only means the container was CREATED. If its
@@ -139,14 +144,15 @@ require_oem_ssh() {
 stage_ssh_check() {
   # Ask the running guest whether it will accept a login.
   #
-  # The container publishes 22 as 2222 on the host (docker run -p 2222:22), so this
-  # is an ordinary TCP check plus a real handshake. It runs right after wait, while
+  # The container publishes port 22 (docker run -p 22:22, matching the guest port
+  # number as the base layer requires), so this is an ordinary TCP check plus a
+  # real handshake. It runs right after wait, while
   # the guest is still up, because that is the only moment the service can be asked.
   #
   # A closed port here means the OEM payload did not run or the capability install
   # failed - both silent during the bake, and both fatal to every later step that
   # wants to script the machine instead of clicking it.
-  local port="${SSH_PORT:-2222}"
+  local port="${SSH_PORT:-22}"
   local password="${PASSWORD:-admin}"
   local user="${USERNAME:-docker}"
   local i rc
