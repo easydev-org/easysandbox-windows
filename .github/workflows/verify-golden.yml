@@ -82,6 +82,7 @@ jobs:
           #
           # Confirmed from the bake's own QEMU arguments:
           #   -drive file=/storage/data.img,id=data3,...
+          mkdir -p storage
           sudo cp --sparse=always "$disk" storage/data.img
           sudo chmod a+r storage/data.img
           ls -la storage/
@@ -179,6 +180,9 @@ jobs:
         if: always()
         run: |
           set -x
+          if ! docker ps --format "{{.Names}}" | grep -qx winverify; then
+            echo "container is not running; nothing to press"; exit 0
+          fi
           docker exec winverify python3 - <<'PY' 2>&1 | tail -8 || true
           import socket, time
           path = "/run/shm/monitor.sock"
