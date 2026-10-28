@@ -25,8 +25,21 @@ set LOG=C:\OEM\ssh-setup.log
 echo [ssh] enabling OpenSSH Server
 
 rem The client is present in most builds; the server is an optional capability
-rem and is the piece that is usually missing.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0" >> %LOG% 2>&1
+rem and is the piece that is usually missing. Add-WindowsCapability downloads the
+rem payload from Windows Update, so it needs the guest to reach the internet inside
+rem the QEMU user network - which dockur provides. DISM is tried first because it
+rem reports a proper error code instead of a PowerShell exception, making a failed
+rem install diagnosable from the log on the finished disk.
+dism.exe /Online /Add-Capability /CapabilityName:OpenSSH.Server~~~~0.0.1.0 /NoRestart >> %LOG% 2>&1
+if errorlevel 1 (
+  echo [ssh] dism failed, trying Add-WindowsCapability >> %LOG%
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0" >> %LOG% 2>&1
+)
+
+rem Report whether the payload actually arrived. If it did not, everything below
+rem fails for a reason that has nothing to do with configuration, and the log has
+rem to say so plainly.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-WindowsCapability -Online -Name OpenSSH.Server* | Select-Object Name,State | Format-List" >> %LOG% 2>&1
 
 rem Without this the service exists but never starts, which looks like ssh is
 rem missing rather than disabled.

@@ -29,7 +29,7 @@ RAM="${RAM:-4G}"
 CPUS="${CPUS:-4}"
 STORAGE="${STORAGE:?set STORAGE}"
 OUT="${OUT:?set OUT}"
-WAIT="${WAIT:-5400}"
+WAIT="${WAIT:-7200}"
 NAME="${NAME:-winbake}"
 
 # The account inside the guest. Named once, here, and used by BOTH the docker run
@@ -192,13 +192,15 @@ stage_ssh_check() {
   local i rc
 
   log "checking ssh on 127.0.0.1:$port (user $user)"
-  for i in $(seq 1 20); do
+  # wait already blocked until this port answered, so a short retry is enough here;
+  # the long wait lives there, where it also serves as the OOBE completion signal.
+  for i in $(seq 1 6); do
     if (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null; then
-      log "port $port is open after $((i*10))s"
+      log "port $port is open after $((i*5))s"
       break
     fi
-    sleep 10
-    if [ "$i" = 20 ]; then
+    sleep 5
+    if [ "$i" = 6 ]; then
       log "ERROR: port $port never opened - sshd is not running in the guest"
       return 1
     fi
@@ -272,6 +274,42 @@ stage_wait() {
       # inspect a stopped container, and this stage is about to stop this one.
       docker exec "$NAME" find /storage -maxdepth 2 -type f -size +1G \( -name "*.img" -o -name "*.qcow2" \) 2>/dev/null | tr -d "\r" > "$STORAGE/.disk-path" || true
       log "recorded disk path: $(head -1 "$STORAGE/.disk-path" 2>/dev/null)"
+
+      # DO NOT STOP YET, and this is the part that was wrong.
+      #
+      # "Boot Manager is booting from the hard disk" means Setup has written the
+      # boot manager and the guest has started booting its own installation. It
+      # does NOT mean Setup Assistant has finished. OOBE still has to run, which is
+      # exactly when C:\OEM\install.bat executes (from the SetupComplete wrapper) -
+      # and stopping here killed the guest in the middle of that window, so the OEM
+      # script never ran and ssh was never enabled. The ssh check then found port
+      # 2222 closed on every bake, which is what it reported once it stopped
+      # treating a missing sshpass as a pass.
+      #
+      # sshd answering on 2222 is the honest "OOBE finished" signal: the OEM script
+      # is the last thing SetupComplete does, and it starts sshd. So wait for the
+      # port, and only then shut down. If the port never comes up the OEM script
+      # failed, and failing here is better than shipping a disk that pretends.
+      log "waiting for OOBE to finish (sshd on 2222 is the completion signal)"
+      local port="${SSH_PORT:-2222}"
+      local ready=0 waited=0
+      while (( waited < 900 )); do
+        if (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null; then
+          log "sshd answered on $port after ${waited}s - OOBE finished"
+          ready=1
+          break
+        fi
+        sleep 15
+        waited=$(( waited + 15 ))
+        if (( waited % 120 == 0 )); then
+          log "still waiting for OOBE: ${waited}s, storage=$(du -m "$STORAGE" 2>/dev/null | awk '{print $1}')MiB"
+        fi
+      done
+      if (( ready == 0 )); then
+        log "ERROR: sshd never came up within 900s - the OEM script did not run or failed"
+        log "container tail:"; docker logs --tail 40 "$NAME" 2>&1 || true
+        return 1
+      fi
       log "stopping the guest so dockur records its boot marker"
       # docker stop sends ACPI shutdown; finish() then runs markWindowsBooted and
       # writes $STORAGE/boot. Give it room: Windows takes a while to shut down.
