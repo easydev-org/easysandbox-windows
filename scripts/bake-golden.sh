@@ -310,7 +310,18 @@ stage_wait() {
       while (( waited < 1500 )); do
         size=$(du -sm "$STORAGE" 2>/dev/null | awk '{print $1}')
         : "${size:=0}"
-        if [ "$size" = "$last_size" ]; then
+        # A TOLERANCE, because byte-equality never happens. Windows keeps writing
+        # logs, event files and registry hives while it sits idle, so du wobbles by
+        # a few MiB forever - measured on this bake: 19561, 19562, 19565, 19569,
+        # 19572, with the quiet counter resetting to 0 every time so the 240s target
+        # was unreachable. Anything inside 50 MiB is idle noise; a real install step
+        # moves hundreds of MiB between samples.
+        local delta=0
+        if [ -n "$last_size" ]; then
+          delta=$(( size - last_size ))
+          (( delta < 0 )) && delta=$(( -delta ))
+        fi
+        if [ -n "$last_size" ] && (( delta <= 50 )); then
           quiet=$(( quiet + 15 ))
         else
           if [ -n "$last_size" ] && [ "$size" -lt "$last_size" ]; then
@@ -318,8 +329,8 @@ stage_wait() {
             log "disk shrank ${last_size} -> ${size} MiB (Setup cleaning up)"
           fi
           quiet=0
-          last_size="$size"
         fi
+        last_size="$size"
         if (( quiet >= 240 )) && (( seen_drop == 1 )); then
           log "disk steady at ${size} MiB for ${quiet}s after cleanup - Setup finished"
           break
