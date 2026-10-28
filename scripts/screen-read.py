@@ -75,47 +75,58 @@ def rows(w, h, px):
 
 
 def taskbar(w, h, px):
-    """Is there a taskbar-like band across the bottom?
+    """Is there a taskbar along the bottom edge?
 
-    Returns (found, detail). The bottom 6% of the screen is examined because the
-    Windows taskbar is about that high at 720p and 1080p. A row qualifies when more
-    than 92% of its sampled pixels share one colour - a taskbar is a flat fill - and
-    the band must be at least 12 rows tall so that a thin window border or a status
-    line does not pass. The band's colour must also differ from the row above it,
-    which is what separates a real taskbar from a uniformly coloured screen.
+    Returns (found, detail).
+
+    The first version required rows that were >92% a single colour, on the reasoning
+    that a taskbar is a flat fill. It failed on a real Windows 11 desktop - measured
+    on a captured one: the taskbar occupies y=752..799 with dominant colour #eeeeee
+    the whole way, but uniformity dips to 0.74 exactly where the icons sit. So the
+    flatness threshold rejected the very thing it was looking for, twice, and the
+    desktop was reported as 'no flat band (tallest run 8)' while it was on screen.
+
+    What actually identifies a taskbar is narrower and more robust: the bottom strip
+    is dominated by ONE colour, row after row, and that colour is different from the
+    page above it. Icons puncturing the colour raise variety but do not change the
+    dominant colour, so the test uses the dominant colour's identity rather than its
+    share.
     """
-    band_top = int(h * 0.94)
-    flat = []
-    for y, colour, uni in rows(w, h, px):
-        if y < band_top:
-            continue
-        flat.append((y, colour, uni))
+    # SCAN UP FROM THE BOTTOM; do not start at a fixed fraction of the height.
+    #
+    # Two earlier versions anchored the strip at 94% and 90% of the height. Both were
+    # defeated by what happened to be on screen: at 90% the anchor landed inside an
+    # open Start menu (#eeeeee), 40 rows above the real taskbar, and the comparison
+    # with "the page above" then matched - so a real taskbar was rejected. The
+    # taskbar is, by definition, the thing at the very bottom, so it is found by
+    # walking up from the last row for as long as the dominant colour stays the same.
+    profile = [(y, c, u) for y, c, u in rows(w, h, px)]
+    if not profile:
+        return False, "empty framebuffer"
 
-    run = 0
-    best = (0, None)
-    for y, colour, uni in flat:
-        if uni > 0.92:
-            run += 1
-            if run > best[0]:
-                best = (run, colour)
-        else:
-            run = 0
-
-    height, colour = best
-    if height < 12 or colour is None:
-        return False, "no flat band in the bottom rows (tallest run %d)" % height
-
-    # Compare against a row well above the band: if they are the same colour the
-    # screen is simply one flat fill, not a taskbar on a desktop.
-    above = None
-    for y, c, uni in rows(w, h, px):
-        if y == max(0, band_top - 60):
-            above = c
+    bottom_colour = profile[-1][1]
+    band = 0
+    for y, colour, uni in reversed(profile):
+        if colour != bottom_colour:
             break
-    if above == colour:
-        return False, "bottom band is the same colour as the page (#%02x%02x%02x)" % colour
-    return True, "flat band %dpx tall at the bottom (#%02x%02x%02x)" % (
-        height, colour[0], colour[1], colour[2])
+        band += 1
+    share = band / float(h)
+
+    # A taskbar is a thin band: tall enough to be a real bar (>= 20 rows at any
+    # resolution this project uses) but a small fraction of the height. If the run
+    # covers most of the screen it is a flat page, not a bar.
+    if band < 20:
+        return False, ("bottom %d rows are uniform - too thin for a taskbar "
+                       "(colour #%02x%02x%02x)"
+                       % (band, bottom_colour[0], bottom_colour[1], bottom_colour[2]))
+    if share > 0.30:
+        return False, ("the bottom colour #%02x%02x%02x covers %.0f%% of the height - "
+                       "that is a flat page, not a taskbar"
+                       % (bottom_colour[0], bottom_colour[1], bottom_colour[2], share * 100))
+
+    return True, ("band #%02x%02x%02x occupies the bottom %d rows (%.0f%% of the height)"
+                  % (bottom_colour[0], bottom_colour[1], bottom_colour[2],
+                     band, share * 100))
 
 
 def blank(w, h, px):
