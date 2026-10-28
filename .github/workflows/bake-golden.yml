@@ -114,7 +114,12 @@ jobs:
       # Ask the guest whether it will accept a login, while it is still running.
       # This is the whole point of the OEM payload: a disk that can be scripted
       # over ssh instead of clicked at.
+      # Runs even when wait failed. A disk that reached a desktop but whose ssh did
+      # not come up is still worth having - it is a working Windows install - and
+      # three runs have now thrown away a finished 12 GiB image because a port check
+      # failed after the install had already succeeded.
       - name: bake extract disk
+        if: always()
         run: sudo -E bash scripts/bake-golden.sh extract
       - name: debug container
         if: failure()

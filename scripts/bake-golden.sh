@@ -118,12 +118,14 @@ stage_start() {
   # any install had started.
   docker run -d --name "$NAME" \
     --device=/dev/kvm \
+    --cap-add NET_ADMIN \
     -e "VERSION=$VERSION" \
     -e "DISK_SIZE=$DISK_SIZE" \
     -e "RAM_SIZE=$RAM" \
     -e "CPU_CORES=$CPUS" \
     -e "USERNAME=$WIN_USER" \
     -e "PASSWORD=$WIN_PASS" \
+    -e "USER_PORTS=2222" \
     -p 2222:2222 \
     -v "$STORAGE:/storage" \
     dockurr/windows > /dev/null
