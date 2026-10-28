@@ -1,0 +1,117 @@
+name: inspect-setup-image
+
+# Look inside the bootable setup image dockur builds, without installing anything.
+#
+# WHY. The golden disk boots to Windows Setup's "Select language settings" and its
+# system partition turns out to be empty, which means Setup never got past its first
+# page. It should skip that page entirely, because the answer file tells it to. So
+# the question is narrow and checkable: is Autounattend.xml actually present in the
+# bootable image, at the path Windows looks in?
+#
+# The image is not a normal ISO. dockur writes it with mtools (image.sh: mtype -i
+# "$tmp" ::/Autounattend.xml), so it is a FAT filesystem - which means mdir/mtype
+# can read it directly, and the listing is authoritative.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Windows version dockur should prepare"
+        required: false
+        default: "11"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-utils mtools
+          mdir --version 2>&1 | head -2 || true
+
+      - name: free disk space
+        run: |
+          set -x
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af || true
+          df -h / | tail -1
+
+      - name: build the setup image
+        run: |
+          set -x
+          mkdir -p storage
+          # Start dockur and let it download Windows and build the bootable image.
+          # It will then begin installing; that is fine, this job only needs the
+          # image it produces, and the job stops the container afterwards.
+          docker run -d --name isoins \
+            --device=/dev/kvm --device=/dev/net/tun --cap-add NET_ADMIN \
+            -e VERSION=${{ github.event.inputs.version }} \
+            -e DISK_SIZE=64G -e RAM_SIZE=8G -e CPU_CORES=4 \
+            -v "$GITHUB_WORKSPACE/storage:/storage" \
+            dockurr/windows
+          echo "waiting for the setup image to appear"
+          for i in $(seq 1 90); do
+            if ls storage/*.iso storage/*.img 2>/dev/null | grep -qv data; then break; fi
+            sleep 10
+          done
+          ls -la storage/ || true
+          docker logs --tail 30 isoins || true
+
+      - name: read the image
+        run: |
+          set -x
+          echo "=== every file dockur produced in /storage ==="
+          ls -la storage/
+          for f in storage/*; do
+            [ -f "$f" ] || continue
+            echo "--- $f ---"
+            file "$f" || true
+            qemu-img info "$f" 2>/dev/null | head -4 || true
+          done
+
+          echo
+          echo "=== looking for the answer file inside each candidate ==="
+          # dockur's setup image is FAT (mtools writes it), so mdir/mtype read it.
+          # A Windows ISO would be ISO9660 and isoinfo/xorriso would be needed
+          # instead, so both are tried rather than assuming which one it built.
+          for f in storage/*.iso storage/*.img storage/*.fat storage/*.vfd; do
+            [ -f "$f" ] || continue
+            case "$f" in *data.img) continue ;; esac
+            echo "===== $f ====="
+            # mtools path: FAT12/16/32
+            if mdir -i "$f" :: 2>/dev/null; then
+              echo "-- root listing above --"
+              echo "-- Autounattend.xml present? --"
+              mtype -i "$f" ::/Autounattend.xml 2>/dev/null | head -40 || echo "   (not found)"
+              echo "-- \$OEM\$ tree --"
+              mdir -i "$f" ::/'\$OEM$' 2>/dev/null || echo "   (no \$OEM\$)"
+            elif command -v isoinfo >/dev/null 2>&1; then
+              isoinfo -i "$f" -l 2>/dev/null | head -40 || true
+              isoinfo -i "$f" -x /Autounattend.xml 2>/dev/null | head -40 || echo "   (not found)"
+            else
+              echo "   neither mtools nor isoinfo could read this file"
+            fi
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: setup-image-listing
+          path: |
+            storage/*.iso
+            storage/*.img
+          if-no-files-found: warn
+          retention-days: 3
+
+      - name: stop
+        if: always()
+        run: docker rm -f isoins || true
