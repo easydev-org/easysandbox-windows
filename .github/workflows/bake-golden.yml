@@ -114,20 +114,6 @@ jobs:
       # Ask the guest whether it will accept a login, while it is still running.
       # This is the whole point of the OEM payload: a disk that can be scripted
       # over ssh instead of clicked at.
-      # Streamed, because its whole value is the evidence: which attempt opened the
-      # port, and whether a login actually succeeded or only the port answered.
-      # Without the stream a green step says nothing about either.
-      - name: bake verify ssh
-        # Not fatal. The disk is the deliverable and a missing ssh is a defect to
-        # report, not a reason to throw away a ten-minute install - the previous run
-        # failed here and skipped extraction, discarding a healthy bake over one port.
-        continue-on-error: true
-        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          name: bake-ssh
-          interval: "15"
-          command: sudo -E bash scripts/bake-golden.sh ssh
       - name: bake extract disk
         run: sudo -E bash scripts/bake-golden.sh extract
       - name: debug container

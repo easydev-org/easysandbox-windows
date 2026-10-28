@@ -292,25 +292,51 @@ stage_wait() {
       # is the last thing SetupComplete does, and it starts sshd. So wait for the
       # port, and only then shut down. If the port never comes up the OEM script
       # failed, and failing here is better than shipping a disk that pretends.
-      log "waiting for OOBE to finish (sshd on 2222 is the completion signal)"
+      # WAIT FOR A REAL SSH BANNER, NOT FOR THE PORT TO ACCEPT.
+      #
+      # A bare TCP connect is a false positive here and it cost a whole run: the
+      # log said "sshd answered on 2222 after 0s" while the guest had only just
+      # written its boot manager, and the separate check thirty seconds later found
+      # nothing listening. The container publishes 2222 and its forwarder completes
+      # the handshake on its own; only a guest with sshd up sends "SSH-2.0-...".
+      #
+      # So read the banner. Nothing but a running sshd in the guest can produce it.
+      log "waiting for OOBE to finish (a real SSH banner is the completion signal)"
       local port="${SSH_PORT:-2222}"
-      local ready=0 waited=0
-      while (( waited < 900 )); do
-        if (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null; then
-          log "sshd answered on $port after ${waited}s - OOBE finished"
-          ready=1
-          break
-        fi
+      local ready=0 waited=0 banner=""
+      while (( waited < 1200 )); do
+        banner=$( (exec 3<>/dev/tcp/127.0.0.1/$port && head -c 64 <&3) 2>/dev/null | tr -d '\r\n' || true)
+        case "$banner" in
+          SSH-*)
+            log "SSH banner from the guest after ${waited}s: ${banner}"
+            ready=1
+            break ;;
+        esac
         sleep 15
         waited=$(( waited + 15 ))
         if (( waited % 120 == 0 )); then
-          log "still waiting for OOBE: ${waited}s, storage=$(du -m "$STORAGE" 2>/dev/null | awk '{print $1}')MiB"
+          log "still waiting for OOBE: ${waited}s, storage=$(du -m "$STORAGE" 2>/dev/null | awk '{print $1}')MiB, port said: ${banner:-<nothing>}"
         fi
       done
       if (( ready == 0 )); then
-        log "ERROR: sshd never came up within 900s - the OEM script did not run or failed"
+        log "ERROR: no SSH banner within 1200s - the OEM script did not run or failed"
         log "container tail:"; docker logs --tail 40 "$NAME" 2>&1 || true
         return 1
+      fi
+
+      # Log in HERE, while the guest is up. The old order ran the login check after
+      # the container was stopped, so it could only ever fail - and it did, every
+      # time, which is why "verify ssh" never established anything.
+      if command -v sshpass >/dev/null 2>&1; then
+        if sshpass -p "$WIN_PASS" ssh -o StrictHostKeyChecking=no \
+             -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 \
+             -p "$port" "$WIN_USER@127.0.0.1" 'echo SSH-OK; whoami'; then
+          log "login as $WIN_USER succeeded"
+        else
+          log "WARNING: banner seen but login as $WIN_USER failed - the account may not be what we asked for"
+        fi
+      else
+        log "sshpass absent; banner proved sshd is running but login was not attempted"
       fi
       log "stopping the guest so dockur records its boot marker"
       # docker stop sends ACPI shutdown; finish() then runs markWindowsBooted and
