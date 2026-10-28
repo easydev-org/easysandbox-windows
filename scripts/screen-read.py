@@ -112,16 +112,21 @@ def taskbar(w, h, px):
         band += 1
     share = band / float(h)
 
-    # A taskbar is a thin band: tall enough to be a real bar (>= 20 rows at any
-    # resolution this project uses) but a small fraction of the height. If the run
-    # covers most of the screen it is a flat page, not a bar.
+    # A taskbar is a THIN band: >= 20 rows to be a real bar, but a small slice of the
+    # height. The 30% ceiling let a false positive through: a Setup screen whose lower
+    # half is flat black ran 234 rows (29% of 800) and was called a taskbar, while the
+    # picture plainly showed 'Please keep your PC on' and no shell at all.
+    #
+    # 10% is the honest ceiling. At 1280x800 the taskbar measured 47 rows (6%); even
+    # at a generous 96px taskbar on a 1080p screen it is under 9%. A band covering a
+    # tenth of the display is background, not a bar.
     if band < 20:
         return False, ("bottom %d rows are uniform - too thin for a taskbar "
                        "(colour #%02x%02x%02x)"
                        % (band, bottom_colour[0], bottom_colour[1], bottom_colour[2]))
-    if share > 0.30:
+    if share > 0.10:
         return False, ("the bottom colour #%02x%02x%02x covers %.0f%% of the height - "
-                       "that is a flat page, not a taskbar"
+                       "that is background, not a taskbar"
                        % (bottom_colour[0], bottom_colour[1], bottom_colour[2], share * 100))
 
     return True, ("band #%02x%02x%02x occupies the bottom %d rows (%.0f%% of the height)"
@@ -168,6 +173,15 @@ def stage_from_text(t):
     if "please keep your computer on" in t or "your pc will restart" in t:
         return "installing"
     if "copying files" in t or "getting files ready" in t or "preparing" in t:
+        return "installing"
+    # The screens around a reboot. Seen on this project's bakes: the frame that got
+    # misread as a desktop said exactly this, and a taskbar-shaped black region under
+    # it was enough to convince the pixel test. Wording like this overrules pixels.
+    if "please keep your pc on" in t or "keep your computer on" in t:
+        return "installing"
+    if "plugged in" in t or "don't turn off" in t or "do not turn off" in t:
+        return "installing"
+    if "just a moment" in t or "almost there" in t or "working on updates" in t:
         return "installing"
     if ("let's connect" in t or "lets connect" in t or "sign in" in t
             or "create a user" in t or "region is correct" in t):

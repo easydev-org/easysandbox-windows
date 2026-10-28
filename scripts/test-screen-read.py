@@ -39,7 +39,7 @@ for path in sys.argv[1:]:
 
 # Synthetic checks, so the taskbar test is exercised in both directions without
 # needing a real desktop dump on hand. These build tiny P6 files in /tmp.
-def synth(w, h, bg, band=None, band_h=40, band_colour=(32, 32, 32)):
+def synth(w, h, bg, band=None, band_h=47, band_colour=(32, 32, 32)):
     buf = bytearray()
     buf += b"P6\n%d %d\n255\n" % (w, h)
     for y in range(h):
@@ -52,12 +52,12 @@ def synth(w, h, bg, band=None, band_h=40, band_colour=(32, 32, 32)):
 import os
 
 cases = [
-    ("flat blue (an install screen's background)", synth(320, 200, (0, 90, 158))),
-    ("desktop: light bg + dark taskbar", synth(320, 200, (230, 230, 230), band=True)),
-    ("desktop: dark bg + lighter taskbar", synth(320, 200, (20, 20, 24), band=True,
+    ("flat blue (an install screen's background)", synth(1280, 800, (0, 90, 158))),
+    ("desktop: light bg + dark taskbar", synth(1280, 800, (230, 230, 230), band=True)),
+    ("desktop: dark bg + lighter taskbar", synth(1280, 800, (20, 20, 24), band=True,
                                                  band_colour=(60, 60, 66))),
-    ("install: light bg, NO taskbar", synth(320, 200, (240, 240, 240))),
-    ("black", synth(320, 200, (0, 0, 0))),
+    ("install: light bg, NO taskbar", synth(1280, 800, (240, 240, 240))),
+    ("black", synth(1280, 800, (0, 0, 0))),
 ]
 print()
 print("=== synthetic cases ===")
