@@ -60,6 +60,9 @@ if [ -n "$CID" ]; then
   echo "  host -> $CID:$PORT  ->  ${hd:-nothing}"
 fi
 
+echo "--- relay self-test (container side) ---"
+PORT="$PORT" NAME="$NAME" bash "$(dirname "$0")/relay-selftest.sh"
+
 echo "--- polling $HOST:$PORT for a banner ---"
 while [ "$SECONDS" -lt "$DEADLINE" ]; do
   banner=$(banner_at "$HOST" "$PORT")

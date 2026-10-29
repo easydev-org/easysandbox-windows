@@ -64,51 +64,33 @@ echo "--- ip_forward ---"
 docker exec "$NAME" sh -c 'sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true'
 docker exec "$NAME" sh -c 'cat /proc/sys/net/ipv4/ip_forward' 2>/dev/null | sed 's/^/  ip_forward=/' || true
 
-# INSERTED AT POSITION 1, NOT APPENDED - and this is why every earlier attempt
-# "succeeded" while the host saw nothing.
+# NO DNAT IN THIS CONTAINER - IT HIJACKS THE RELAY.
 #
-# docker publishes a port by adding its own PREROUTING jump:
-#   -A PREROUTING -m addrtype --dst-type LOCAL -j DOCKER
-#   -A DOCKER ! -i docker -p tcp --dport 2222 -j DNAT --to-destination 172.17.0.2:2222
+# I copied setup_network() here, and the rules were correct in isolation: PREROUTING
+# position 1, scoped to tcp/2222, DNAT to the guest, MASQUERADE, FORWARD accepts. The
+# run then showed both things at once:
 #
-# Appending my rule put it AFTER that jump, so the packet had already been rewritten to
-# the container's own address - no longer 'dst-type LOCAL' - and my rule could never
-# match. The rules were present, correct, and unreachable.
+#   container: LISTEN 0.0.0.0:2222        (the relay, working)
+#   host -> 172.17.0.2:2222 -> nothing     (never reached it)
 #
-# -I PREROUTING 1 makes the packet be judged before docker's jump: straight to the
-# guest, instead of to the container address where nothing listens.
-echo "--- installing the nat and filter rules (tcp/$PORT only) ---"
+# Because a packet from the host arrives at eth0 addressed to 172.17.0.2:2222, which IS
+# LOCAL with dport 2222 - so my own rule matched it and sent it to 172.30.0.2:2222
+# instead of letting it reach the relay that was waiting on that exact address. The
+# rules were fighting the listener.
+#
+# Upstream does not have this problem because it has no relay and no VNC: its DNAT is
+# the only mechanism. Here the published port already arrives addressed to this
+# container, so the listener alone is the whole answer. The DNAT is removed, and any
+# copy an earlier run installed is removed too - leaving it would silently steal the
+# traffic again.
+echo "--- removing any nat rules an earlier run installed ---"
 docker exec "$NAME" sh -c "
-  iptables -t nat -N QEMU_DNAT 2>/dev/null || true
-  iptables -t nat -F QEMU_DNAT
-
-  # Remove EVERY QEMU_DNAT jump before inserting, or an older unscoped rule keeps
-  # matching wider than intended. The previous run left:
-  #   -A PREROUTING ! -i docker --dst-type LOCAL -j QEMU_DNAT     <- no port filter
-  # alongside the correct one, so any local port still went to the guest.
   while iptables -t nat -D PREROUTING -m comment --comment QEMU_DNAT -j QEMU_DNAT 2>/dev/null; do :; done
-  iptables -t nat -I PREROUTING 1 ! -i '$BRIDGE' -m addrtype --dst-type LOCAL -p tcp --dport '$PORT' -m comment --comment QEMU_DNAT -j QEMU_DNAT
-  echo '  PREROUTING cleaned of earlier QEMU_DNAT jumps, ours inserted at 1' 
-
-  iptables -t nat -C POSTROUTING -s '$BRIDGE_IP/$PREFIX' -j MASQUERADE 2>/dev/null ||
-  iptables -t nat -A POSTROUTING -s '$BRIDGE_IP/$PREFIX' ! -d '$BRIDGE_IP/$PREFIX' ! -o '$BRIDGE' -m comment --comment QEMU_DNAT -j MASQUERADE
-
-  iptables -t nat -A QEMU_DNAT -p tcp --dport '$PORT' -m comment --comment QEMU_DNAT -j DNAT --to-destination '$GUEST_IP':'$PORT'
-
-  iptables -t filter -C FORWARD -s '$BRIDGE_IP/$PREFIX' -j ACCEPT 2>/dev/null ||
-  iptables -t filter -A FORWARD -s '$BRIDGE_IP/$PREFIX' -i '$BRIDGE' ! -o '$BRIDGE' -j ACCEPT
-
-  iptables -t filter -C FORWARD -d '$GUEST_IP/32' -j ACCEPT 2>/dev/null ||
-  iptables -t filter -A FORWARD -d '$GUEST_IP/32' ! -i '$BRIDGE' -o '$BRIDGE' -j ACCEPT
-
-  echo '  --- nat QEMU_DNAT ---'
-  iptables -t nat -S QEMU_DNAT 2>/dev/null
-  echo '  --- nat PREROUTING in order (ours must be first) ---'
-  iptables -t nat -S PREROUTING 2>/dev/null | head -8
-  echo '  --- nat POSTROUTING (ours) ---'
-  iptables -t nat -S POSTROUTING 2>/dev/null | grep QEMU_DNAT || true
-  echo '  --- filter FORWARD (ours) ---'
-  iptables -S FORWARD 2>/dev/null | grep '172.30.' || true
+  iptables -t nat -F QEMU_DNAT 2>/dev/null || true
+  iptables -t nat -X QEMU_DNAT 2>/dev/null || true
+  while iptables -t nat -D POSTROUTING -m comment --comment QEMU_DNAT -j MASQUERADE 2>/dev/null; do :; done
+  echo '  remaining PREROUTING:'
+  iptables -t nat -S PREROUTING 2>/dev/null | head -6
 " 2>&1 | sed 's/^/  /'
 
 echo "--- container -> guest:$PORT ---"
@@ -138,7 +120,12 @@ docker exec "$NAME" sh -c "
 # nothing was listening. So something now listens there, relaying to the guest. That is
 # the one piece docker's own DNAT assumes exists.
 echo "--- starting a listener on the container address ---"
-CPORT_IP=$(docker exec "$NAME" sh -c "ip -o -4 addr show eth0 2>/dev/null" | awk '{print \$4}' | cut -d/ -f1)
+# Parsed on the HOST. Running awk with {print \$4} inside docker exec -> sh -c is what
+# produced 'awk: backslash not last character on line' on the previous run, and the
+# relay silently fell back to 0.0.0.0.
+# grep -oE avoids the escaped-paren sed pattern; the same backslash nesting
+# that broke awk would break sed identically. Parsed on the host.
+CPORT_IP=$(docker exec "$NAME" sh -c "ip -4 -o addr show eth0 2>/dev/null" 2>/dev/null | grep -oE "inet [0-9.]+" | head -1 | cut -d" " -f2)
 echo "  container ip: ${CPORT_IP:-unknown}"
 docker cp "$(dirname "$0")/guest-relay.py" "$NAME:/tmp/guest-relay.py"
 docker exec "$NAME" sh -c 'pkill -f guest-relay.py 2>/dev/null || true; rm -f /tmp/relay.log' || true
