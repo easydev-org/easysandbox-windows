@@ -104,6 +104,15 @@ echo "--- removing EVERY nat rule an earlier run installed ---"
 docker cp "$(dirname "$0")/cleanup-nat.sh" "$NAME:/tmp/cleanup-nat.sh"
 docker exec "$NAME" sh /tmp/cleanup-nat.sh
 
+# MEASURE WHETHER THE PACKET ARRIVES, not just whether it succeeds.
+#
+# Every previous conclusion about this port - docker proxy, netns, bind address, backlog,
+# nat rules - was inferred from 'no banner'. None of them measured whether a SYN from this
+# host reaches the container at all. This does: it opens a connection in the background
+# and reads the container socket table while it is pending.
+echo "--- host->container arrival probe ---"
+NAME="$NAME" PORT="$PORT" HOST=127.0.0.1 bash "$(dirname "$0")/probe-arrival.sh"
+
 echo "--- container -> guest:$PORT ---"
 docker exec "$NAME" sh -c "
   if command -v nc >/dev/null 2>&1; then
