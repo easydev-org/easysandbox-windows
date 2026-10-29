@@ -114,22 +114,39 @@ jobs:
           waited=0
           limit=${{ github.event.inputs.boot_wait }}
           stage=""
-          while [ "$waited" -lt "$limit" ]; do
+          # TIME THE WALL CLOCK, NOT A COUNTER.
+          #
+          # The loop used to add 20 for each pass and sleep 20, but a pass also costs
+          # a screendump (~2s), a docker cp (~0.5s) and tesseract (~3s). So 'waited'
+          # ran about 30% slow and boot_wait=900 really meant ~20 minutes of wall
+          # clock - which is why the last run reported 'desktop reached after 910s'
+          # while the job step showed 910s of counter against far more real time.
+          # SECONDS counts real elapsed seconds, so the limit means what it says.
+          start=$SECONDS
+          while : ; do
+            waited=$((SECONDS - start))
+            [ "$waited" -ge "$limit" ] && break
             docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/b.ppm >/dev/null 2>&1 || true
             docker cp sshinst:/tmp/b.ppm shots/boot.ppm >/dev/null 2>&1 || true
+            stage="unknown"
             if [ -s shots/boot.ppm ]; then
+              # Try the cheap structural test first and only run tesseract when that
+              # says nothing: a black framebuffer or a taskbar answer needs no OCR.
               stage=$(python3 scripts/screen-read.py shots/boot.ppm 2>/dev/null || echo unknown)
             fi
             echo "t=${waited}s stage=${stage}"
             [ "$stage" = "desktop" ] && break
-            sleep 20
-            waited=$((waited + 20))
+            # Poll harder while Setup is visibly busy, less when the screen does not
+            # change: a picture that is identical to the previous one rarely flips in
+            # the next 15 seconds.
+            sleep 15
           done
           python3 scripts/ppm2png.py shots/boot.ppm shots/boot.png >/dev/null 2>&1 || true
           [ "$stage" = "desktop" ] || { echo "never reached a desktop"; docker logs --tail 40 sshinst || true; exit 1; }
           echo "desktop reached after ${waited}s"
           # Windows needs a moment after the shell appears before Run will take focus.
           sleep 20
+          python3 scripts/screen-read.py shots/boot.ppm --verbose 2>&1 | tail -3 || true
 
       - name: open PowerShell via Run
         run: |
@@ -244,7 +261,16 @@ jobs:
           #
           # Sent as one line so a single Enter runs the lot: keystrokes are slow and
           # every extra line is another chance to mistype into the wrong window.
-          fix="Set-Service sshd -StartupType Automatic; Start-Service sshd; (Get-Content C:\\ProgramData\\ssh\\sshd_config) -replace '^#?\\s*Port\\s+.*','Port $port' -replace '^#?\\s*PasswordAuthentication\\s+.*','PasswordAuthentication yes' | Set-Content C:\\ProgramData\\ssh\\sshd_config; Restart-Service sshd"
+          #
+          # AND THE FIREWALL. REBAKE.md records that the real golden disk has
+          # EnableFirewall=0 across all profiles, baked in as registry state - but this
+          # disk came straight from Setup, where the firewall is ON, and the winget MSI
+          # does not add an inbound rule for its own port. sshd listening and the host
+          # seeing nothing is exactly what that produces. Rather than depend on a rule
+          # being created, the firewall is turned off the same way the project's own
+          # golden disk has it - plus an explicit rule for the port, so either mechanism
+          # alone is enough.
+          fix="Set-Service sshd -StartupType Automatic; Start-Service sshd; (Get-Content C:\\ProgramData\\ssh\\sshd_config) -replace '^#?\\s*Port\\s+.*','Port $port' -replace '^#?\\s*PasswordAuthentication\\s+.*','PasswordAuthentication yes' | Set-Content C:\\ProgramData\\ssh\\sshd_config; Restart-Service sshd; Set-NetFirewallProfile -All -Enabled False; New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH Server' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort $port -ErrorAction SilentlyContinue"
           echo "typing: $fix"
           docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock "$fix" --enter
           sleep 40
