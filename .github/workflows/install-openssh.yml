@@ -30,7 +30,7 @@ on:
       boot_wait:
         description: "Seconds to let Windows reach the desktop before typing"
         required: false
-        default: "300"
+        default: "900"
       port:
         description: "sshd port inside the guest (also the forwarded host port)"
         required: false
