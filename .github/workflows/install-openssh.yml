@@ -174,7 +174,7 @@ jobs:
           # --source winget keeps it away from msstore, which demands a region and does
           # not carry this package. --disable-interactivity stops winget waiting for a
           # keypress nobody can give.
-          cmd1="winget install --id Microsoft.OpenSSH.Beta --exact --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity"
+          cmd1="winget install --id Microsoft.OpenSSH.Preview --exact --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity"
           echo "typing: $cmd1"
           docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock "$cmd1" --enter
           echo "waiting for winget (up to 6 minutes)"
@@ -182,6 +182,45 @@ jobs:
           docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/w1.ppm >/dev/null 2>&1 || true
           docker cp sshinst:/tmp/w1.ppm shots/winget.ppm >/dev/null 2>&1 || true
           python3 scripts/ppm2png.py shots/winget.ppm shots/winget.png >/dev/null 2>&1 || true
+
+      - name: enable and start sshd
+        run: |
+          set -x
+          port=${{ github.event.inputs.port }}
+          # The MSI registers the sshd service but leaves it Manual, and its default
+          # sshd_config listens on 22 with password authentication commented out. Both
+          # have to be changed or the install is a no-op from the host's side.
+          #
+          # Sent as one line so a single Enter runs the lot: keystrokes are slow and
+          # every extra line is another chance to mistype into the wrong window.
+          fix="Set-Service sshd -StartupType Automatic; Start-Service sshd; (Get-Content C:\\ProgramData\\ssh\\sshd_config) -replace '^#?\\s*Port\\s+.*','Port $port' -replace '^#?\\s*PasswordAuthentication\\s+.*','PasswordAuthentication yes' | Set-Content C:\\ProgramData\\ssh\\sshd_config; Restart-Service sshd"
+          echo "typing: $fix"
+          docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock "$fix" --enter
+          sleep 40
+          docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/f1.ppm >/dev/null 2>&1 || true
+          docker cp sshinst:/tmp/f1.ppm shots/sshd.ppm >/dev/null 2>&1 || true
+          python3 scripts/ppm2png.py shots/sshd.ppm shots/sshd.png >/dev/null 2>&1 || true
+
+      - name: check the port from the host
+        run: |
+          set -x
+          port=${{ github.event.inputs.port }}
+          # -p $port:$port is published, and the base layer forwards a published port
+          # to the guest port of the same number, so a working sshd shows up here as a
+          # real SSH banner. A bare TCP connect is not enough: the forwarder completes
+          # the handshake on its own, which produced false positives earlier.
+          for i in $(seq 1 12); do
+            banner=$(timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/$port && head -c 64 <&3" 2>/dev/null | tr -d '\r\n' || true)
+            case "$banner" in
+              SSH-*) echo "ssh banner after $((i*10))s: $banner"; echo "SSH_OK" > ssh-ok ;;
+            esac
+            [ -f ssh-ok ] && break
+            sleep 10
+          done
+          [ -f ssh-ok ] || echo "no SSH banner on 127.0.0.1:$port"
+          docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/f2.ppm >/dev/null 2>&1 || true
+          docker cp sshinst:/tmp/f2.ppm shots/final.ppm >/dev/null 2>&1 || true
+          python3 scripts/ppm2png.py shots/final.ppm shots/final.png >/dev/null 2>&1 || true
 
       - uses: actions/upload-artifact@v4
         if: always()
