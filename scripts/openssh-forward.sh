@@ -168,7 +168,10 @@ docker exec "$NAME" sh -c 'pkill -f guest-relay.py 2>/dev/null || true; rm -f /t
 # failed was sshd, not the bind (the frame showed CouldNotStopService). So the combination
 # 'working sshd + bind 0.0.0.0' has never been tested. sshd is now proven by the step
 # that prints Get-Service and Get-NetTCPConnection, so this changes one variable.
-docker exec -d "$NAME" sh -c "python3 /tmp/guest-relay.py $PORT $GUEST_IP $PORT 0.0.0.0 > /tmp/relay.log 2>&1"
+# No bind argument: guest-relay.py now creates an AF_INET6 socket with IPV6_V6ONLY off
+# and listen(511), mirroring dockur's own listener (measured 'LISTEN 0 511 *:8006 *:*'),
+# which is the one that answers from outside. Passing 0.0.0.0 would keep it IPv4-only.
+docker exec -d "$NAME" sh -c "python3 /tmp/guest-relay.py $PORT $GUEST_IP $PORT > /tmp/relay.log 2>&1"
 sleep 4
 docker exec "$NAME" sh -c "
   echo '  relay pid:' \$(pgrep -f guest-relay.py | tr '\n' ' ')

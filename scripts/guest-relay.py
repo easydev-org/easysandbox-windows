@@ -66,12 +66,36 @@ def main():
     if len(sys.argv) not in (4, 5):
         sys.exit("usage: guest-relay.py <listen-port> <guest-address> <guest-port> [bind]")
     listen, target, tport = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
-    bind = sys.argv[4] if len(sys.argv) == 5 else "0.0.0.0"
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    bind = sys.argv[4] if len(sys.argv) == 5 else None
+
+    # MATCH THE SOCKET THAT WORKS.
+    #
+    # Measured side by side in one run:
+    #
+    #   my relay :  LISTEN 0  64   0.0.0.0:2222   0.0.0.0:*
+    #   dockur   :  LISTEN 0 511         *:8006         *:*
+    #
+    # Two differences, both plausible causes of 'answers inside, silent outside':
+    #
+    #   * is an IPv6 socket with IPV6_V6ONLY off, so it accepts both families. docker
+    #     reaches the container over a dual-stack bridge; an IPv4-only socket can miss
+    #     connections that arrive mapped.
+    #   backlog 511 against my 64 - the kernel drops SYNs beyond the queue, and a
+    #     published port under docker's proxy can burst.
+    #
+    # So this mirrors dockur exactly: AF_INET6, V6ONLY off, backlog 511. The bind address
+    # argument is still honoured when given (translated to its IPv6 form), because the
+    # caller passes one.
+    srv = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind((bind, listen))
-    srv.listen(64)
-    print("relaying %s:%d -> %s:%d" % (bind, listen, target, tport), flush=True)
+    try:
+        srv.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+    except (AttributeError, OSError):
+        pass
+    host = "::" if not bind or bind in ("0.0.0.0", "::") else bind
+    srv.bind((host, listen))
+    srv.listen(511)
+    print("relaying [%s]:%d -> %s:%d (dual-stack, backlog 511)" % (host, listen, target, tport), flush=True)
     while True:
         client, _ = srv.accept()
         threading.Thread(target=serve, args=(client, target, tport), daemon=True).start()
