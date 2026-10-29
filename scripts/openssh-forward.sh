@@ -129,11 +129,21 @@ CPORT_IP=$(docker exec "$NAME" sh -c "ip -4 -o addr show eth0 2>/dev/null" 2>/de
 echo "  container ip: ${CPORT_IP:-unknown}"
 docker cp "$(dirname "$0")/guest-relay.py" "$NAME:/tmp/guest-relay.py"
 docker exec "$NAME" sh -c 'pkill -f guest-relay.py 2>/dev/null || true; rm -f /tmp/relay.log' || true
-if [ -n "$CPORT_IP" ]; then
-  docker exec -d "$NAME" sh -c "python3 /tmp/guest-relay.py $PORT $GUEST_IP $PORT $CPORT_IP > /tmp/relay.log 2>&1"
-else
-  docker exec -d "$NAME" sh -c "python3 /tmp/guest-relay.py $PORT $GUEST_IP $PORT > /tmp/relay.log 2>&1"
-fi
+# BIND 0.0.0.0, THE SAME AS THE LISTENER THAT WORKS.
+#
+# The control test separated cause from coincidence in one shot - same script, same
+# moment, same IP:
+#
+#   this machine -> 172.17.0.2:8006  ->  HTTP/1.1 200 OK      (dockur's own listener)
+#   this machine -> 172.17.0.2:2222  ->  nothing              (my relay)
+#   container    -> 172.17.0.2:2222  ->  SSH-2.0-OpenSSH...   (relay is fine)
+#
+# So the path to that address is open and the relay answers; the only structural
+# difference is the bind address. dockur listens on 0.0.0.0, my relay bound the
+# container's specific address. A socket bound to 172.17.0.2 and reached through docker's
+# DNAT can reply along a path the peer will not accept, whereas 0.0.0.0 matches what the
+# working listener does. Changing exactly that one thing.
+docker exec -d "$NAME" sh -c "python3 /tmp/guest-relay.py $PORT $GUEST_IP $PORT 0.0.0.0 > /tmp/relay.log 2>&1"
 sleep 4
 docker exec "$NAME" sh -c "
   echo '  relay pid:' \$(pgrep -f guest-relay.py | tr '\n' ' ')
