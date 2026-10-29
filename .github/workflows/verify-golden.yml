@@ -134,7 +134,7 @@ jobs:
           # writes the marker with plain `touch`. With it present dockur treats the
           # disk as an installed system and just starts it, on the same firmware
           # settings it was installed with.
-          touch storage/boot
+          touch storage/windows.boot
           echo "created completion marker: $(ls -la storage/boot)"
 
           ls -la storage/

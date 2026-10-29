@@ -68,7 +68,7 @@ jobs:
             qemu-img convert -O raw "$disk" storage/data.img
             state=$(find artifact -name '*.bootstate.tar.gz' | head -1 || true)
             [ -n "$state" ] && tar xzf "$state" -C storage
-            touch storage/boot
+            touch storage/windows.boot
           fi
           ls -la storage/
 

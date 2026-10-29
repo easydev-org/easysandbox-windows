@@ -98,7 +98,7 @@ jobs:
           # The completion marker tells dockur the install is finished, so it boots the
           # disk instead of falling into its install path - which would also force
           # Secure Boot on and the firmware would then refuse this disk's boot entry.
-          touch storage/boot
+          touch storage/windows.boot
           ls -la storage/
 
       - name: boot it
