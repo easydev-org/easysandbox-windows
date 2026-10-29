@@ -105,48 +105,37 @@ jobs:
           docker ps -a
           docker logs --tail 30 sshinst || true
 
-      - name: wait for the desktop
+      # Helpers the streamed script expects to already be in the container.
+      - name: stage the helpers into the container
         run: |
           set -x
           mkdir -p shots
           docker cp scripts/shotsock.py sshinst:/tmp/shotsock.py
           docker cp scripts/guest-type.py sshinst:/tmp/guest-type.py
-          waited=0
-          limit=${{ github.event.inputs.boot_wait }}
-          stage=""
-          # TIME THE WALL CLOCK, NOT A COUNTER.
-          #
-          # The loop used to add 20 for each pass and sleep 20, but a pass also costs
-          # a screendump (~2s), a docker cp (~0.5s) and tesseract (~3s). So 'waited'
-          # ran about 30% slow and boot_wait=900 really meant ~20 minutes of wall
-          # clock - which is why the last run reported 'desktop reached after 910s'
-          # while the job step showed 910s of counter against far more real time.
-          # SECONDS counts real elapsed seconds, so the limit means what it says.
-          start=$SECONDS
-          while : ; do
-            waited=$((SECONDS - start))
-            [ "$waited" -ge "$limit" ] && break
-            docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/b.ppm >/dev/null 2>&1 || true
-            docker cp sshinst:/tmp/b.ppm shots/boot.ppm >/dev/null 2>&1 || true
-            stage="unknown"
-            if [ -s shots/boot.ppm ]; then
-              # Try the cheap structural test first and only run tesseract when that
-              # says nothing: a black framebuffer or a taskbar answer needs no OCR.
-              stage=$(python3 scripts/screen-read.py shots/boot.ppm 2>/dev/null || echo unknown)
-            fi
-            echo "t=${waited}s stage=${stage}"
-            [ "$stage" = "desktop" ] && break
-            # Poll harder while Setup is visibly busy, less when the screen does not
-            # change: a picture that is identical to the previous one rarely flips in
-            # the next 15 seconds.
-            sleep 15
-          done
+
+      # STREAMED. This is the longest step in the job - thirteen minutes on the last
+      # run - and GitHub publishes a job's log only when it finishes, so all of that
+      # time was invisible; a 804s wait went unexamined for exactly that reason.
+      # log-stream writes into a check run, which is readable while it runs.
+      - name: wait for the desktop
+        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: openssh-wait
+          interval: "20"
+          command: bash scripts/openssh-wait.sh
+        env:
+          BOOT_WAIT: ${{ github.event.inputs.boot_wait }}
+          SHOTS: shots
+          NAME: sshinst
+
+      - name: wait result
+        run: |
+          set -x
           python3 scripts/ppm2png.py shots/boot.ppm shots/boot.png >/dev/null 2>&1 || true
-          [ "$stage" = "desktop" ] || { echo "never reached a desktop"; docker logs --tail 40 sshinst || true; exit 1; }
-          echo "desktop reached after ${waited}s"
-          # Windows needs a moment after the shell appears before Run will take focus.
-          sleep 20
           python3 scripts/screen-read.py shots/boot.ppm --verbose 2>&1 | tail -3 || true
+          # The shell needs a moment after the desktop appears before Run takes focus.
+          sleep 20
 
       - name: open PowerShell via Run
         run: |
@@ -245,8 +234,27 @@ jobs:
           cmd1="winget install --id Microsoft.OpenSSH.Preview --exact --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity"
           echo "typing: $cmd1"
           docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock "$cmd1" --enter
-          echo "waiting for winget (up to 6 minutes)"
-          sleep 360
+          # POLL, DO NOT SLEEP A FIXED SIX MINUTES.
+          #
+          # winget finished in 52 seconds on every run so far, and then this waited
+          # another five minutes doing nothing - the single largest avoidable cost in
+          # the job after the boot itself. The screen is the signal: while winget is
+          # working the window shows download or install progress, and when it is done
+          # the prompt is back with no percentage on it. So the loop watches for the
+          # progress wording to disappear, with a ceiling.
+          deadline=$((SECONDS + 420))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            sleep 20
+            docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/w1.ppm >/dev/null 2>&1 || true
+            docker cp sshinst:/tmp/w1.ppm shots/winget.ppm >/dev/null 2>&1 || true
+            [ -s shots/winget.ppm ] || continue
+            if python3 scripts/screen-read.py shots/winget.ppm 2>/dev/null | grep -q installing; then
+              echo "  winget still working ($((SECONDS))s elapsed)"
+            else
+              echo "  winget appears finished after $((SECONDS))s"
+              break
+            fi
+          done
           docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/w1.ppm >/dev/null 2>&1 || true
           docker cp sshinst:/tmp/w1.ppm shots/winget.ppm >/dev/null 2>&1 || true
           python3 scripts/ppm2png.py shots/winget.ppm shots/winget.png >/dev/null 2>&1 || true
@@ -301,6 +309,22 @@ jobs:
           docker port sshinst || true
           echo "--- docker logs, network lines ---"
           docker logs sshinst 2>&1 | grep -iE "mode|guest:|forward|user-mode|USER_PORTS" | head -10 || true
+
+      # THE FORWARD THAT WAS MISSING.
+      #
+      # In NAT mode the guest gets its own address (the log says "Guest: 172.30.0.2")
+      # and QEMU runs with a plain tap netdev and no hostfwd:
+      #
+      #   -netdev tap,id=hostnet0,ifname=qemu,script=no,downscript=no
+      #
+      # so publishing 2222 with docker only reaches the container. USER_PORTS cannot
+      # help - its documentation scopes it to user-mode networking. One DNAT rule in
+      # the container's nat table is what carries the published port to the guest, and
+      # it needs NET_ADMIN, which this container already has.
+      - name: forward the published port into the guest
+        run: |
+          set -x
+          PORT=${{ github.event.inputs.port }} NAME=sshinst bash scripts/openssh-dnat.sh
 
       - name: test ssh from inside the guest
         run: |
