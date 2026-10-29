@@ -119,3 +119,37 @@ docker exec "$NAME" sh -c "
     timeout 5 sh -c 'echo > /dev/tcp/$GUEST_IP/$PORT' 2>/dev/null && echo '  direct: open' || echo '  direct: closed'
   fi
 " 2>&1
+
+# AND A LISTENER ON THE CONTAINER'S OWN ADDRESS.
+#
+# The host side was printed on the last run and settles it:
+#
+#   host nat:      -i docker0 -p tcp --dport 2222 -j DNAT --to-destination 172.17.0.2:2222
+#   host listen:   LISTEN 0.0.0.0:2222   (docker-proxy)
+#   host -> 172.17.0.2:2222  ->  nothing
+#
+# docker rewrites the destination on the HOST, before the packet ever enters this
+# namespace, so by the time it arrives here its destination is 172.17.0.2:2222 - no
+# longer LOCAL - and my container-side DNAT can never match. The container-side rules
+# are still right for traffic that originates inside; they are simply not the path a
+# published port takes.
+#
+# The path a published port takes ends at 172.17.0.2:2222 inside this container, where
+# nothing was listening. So something now listens there, relaying to the guest. That is
+# the one piece docker's own DNAT assumes exists.
+echo "--- starting a listener on the container address ---"
+CPORT_IP=$(docker exec "$NAME" sh -c "ip -o -4 addr show eth0 2>/dev/null" | awk '{print \$4}' | cut -d/ -f1)
+echo "  container ip: ${CPORT_IP:-unknown}"
+docker cp "$(dirname "$0")/guest-relay.py" "$NAME:/tmp/guest-relay.py"
+docker exec "$NAME" sh -c 'pkill -f guest-relay.py 2>/dev/null || true; rm -f /tmp/relay.log' || true
+if [ -n "$CPORT_IP" ]; then
+  docker exec -d "$NAME" sh -c "python3 /tmp/guest-relay.py $PORT $GUEST_IP $PORT $CPORT_IP > /tmp/relay.log 2>&1"
+else
+  docker exec -d "$NAME" sh -c "python3 /tmp/guest-relay.py $PORT $GUEST_IP $PORT > /tmp/relay.log 2>&1"
+fi
+sleep 4
+docker exec "$NAME" sh -c "
+  echo '  relay pid:' \$(pgrep -f guest-relay.py | tr '\n' ' ')
+  (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep ':'$PORT' ' | sed 's/^/  /' || echo '  (not listening)'
+  sed 's/^/  log: /' /tmp/relay.log 2>/dev/null || echo '  (no log)'
+"

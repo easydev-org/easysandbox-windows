@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
 """Relay TCP from a container port to the guest's sshd.
 
-    guest-relay.py <listen-port> <guest-address> <guest-port>
+    guest-relay.py <listen-port> <guest-address> <guest-port> [bind-address]
 
 Runs inside the dockur container. One thread per direction per client, and a fresh
 upstream connection for every client, so concurrent SSH sessions do not share state.
 
-WHY A RELAY AND NOT iptables. The container can already open a connection to
-172.30.0.2:2222 - that was measured. What is missing is something answering on the
-container's own port, because docker's published-port proxy delivers the connection
-into the container's network namespace where no process is listening; a nat-table
-DNAT rule never sees that traffic as forwarded. Listening here and connecting
-upstream is the same path the working measurement already took.
+WHY THIS IS STILL NEEDED, after the container-side DNAT was copied from sandbox.sh.
+
+The host side settles it, printed by the last run:
+
+  host nat:     -i docker0 -p tcp --dport 2222 -j DNAT --to-destination 172.17.0.2:2222
+  host listen:  LISTEN 0.0.0.0:2222   (docker-proxy)
+  host -> 172.17.0.2:2222  ->  nothing
+
+docker rewrites the destination on the HOST, so a published port arrives here already
+addressed to 172.17.0.2:2222 - not LOCAL - and a container-side nat rule can never match
+it. The rules copied from sandbox.sh remain correct for traffic originating inside the
+container; they are simply not the path a published port takes. That path ends at the
+container's own address, where nothing was listening.
+
+Bind address exists because of that: listening on 0.0.0.0 works, but naming the address
+docker forwards to makes the intent explicit and keeps the relay off the loopback.
 """
 import socket
 import sys
@@ -53,14 +63,15 @@ def serve(client, target, tport):
 
 
 def main():
-    if len(sys.argv) != 4:
-        sys.exit("usage: guest-relay.py <listen-port> <guest-address> <guest-port>")
+    if len(sys.argv) not in (4, 5):
+        sys.exit("usage: guest-relay.py <listen-port> <guest-address> <guest-port> [bind]")
     listen, target, tport = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+    bind = sys.argv[4] if len(sys.argv) == 5 else "0.0.0.0"
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("0.0.0.0", listen))
+    srv.bind((bind, listen))
     srv.listen(64)
-    print("relaying 0.0.0.0:%d -> %s:%d" % (listen, target, tport), flush=True)
+    print("relaying %s:%d -> %s:%d" % (bind, listen, target, tport), flush=True)
     while True:
         client, _ = srv.accept()
         threading.Thread(target=serve, args=(client, target, tport), daemon=True).start()
