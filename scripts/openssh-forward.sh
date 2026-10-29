@@ -143,7 +143,19 @@ docker exec "$NAME" sh -c 'pkill -f guest-relay.py 2>/dev/null || true; rm -f /t
 # container's specific address. A socket bound to 172.17.0.2 and reached through docker's
 # DNAT can reply along a path the peer will not accept, whereas 0.0.0.0 matches what the
 # working listener does. Changing exactly that one thing.
-docker exec -d "$NAME" sh -c "python3 /tmp/guest-relay.py $PORT $GUEST_IP $PORT 0.0.0.0 > /tmp/relay.log 2>&1"
+# BIND THE CONTAINER ADDRESS - reverted from 0.0.0.0 after measuring both.
+#
+# The 0.0.0.0 attempt was made on the theory that dockur's working 8006 listener binds
+# 0.0.0.0 and mine should match. That run failed differently: even the container's own
+# self-connect returned nothing, which pointed at sshd rather than the bind. Checking the
+# frame proved it - the guest's PowerShell showed
+#
+#   + FullyQualifiedErrorId : CouldNotStopService,RestartServiceCommand
+#
+# so sshd was still on port 22 and the relay had nothing upstream to talk to. The bind
+# was never the problem; a bind that works (172.17.0.2, measured 'SSH-2.0-OpenSSH...')
+# should not be changed on a theory.
+docker exec -d "$NAME" sh -c "python3 /tmp/guest-relay.py $PORT $GUEST_IP $PORT $CPORT_IP > /tmp/relay.log 2>&1"
 sleep 4
 docker exec "$NAME" sh -c "
   echo '  relay pid:' \$(pgrep -f guest-relay.py | tr '\n' ' ')
