@@ -40,3 +40,10 @@ fi
   c=$(timeout 5 bash -c "exec 3<>/dev/tcp/$cid/8006; printf 'GET / HTTP/1.0\r\n\r\n' >&3; head -c 40 <&3" 2>/dev/null | tr -d "\r\n" || true)
 
 echo "    -> 127.0.0.1:8006 -> ${c2:-nothing}"
+
+echo "  --- filter INPUT in the container (does anything drop 2222?) ---"
+docker exec "$NAME" sh -c "iptables -S INPUT 2>/dev/null | head -20" 2>&1 | sed "s/^/    /"
+echo "  --- all established/半开 connections to the port ---"
+docker exec "$NAME" sh -c "(ss -tn 2>/dev/null || netstat -tn 2>/dev/null) | grep ':$PORT' | head -10" 2>&1 | sed "s/^/    /" || true
+echo "  --- is anything else listening on 8006 for comparison ---"
+docker exec "$NAME" sh -c "(ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep ':8006'" 2>&1 | sed "s/^/    /" || true

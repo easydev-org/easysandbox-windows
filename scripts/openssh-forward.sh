@@ -155,7 +155,20 @@ docker exec "$NAME" sh -c 'pkill -f guest-relay.py 2>/dev/null || true; rm -f /t
 # so sshd was still on port 22 and the relay had nothing upstream to talk to. The bind
 # was never the problem; a bind that works (172.17.0.2, measured 'SSH-2.0-OpenSSH...')
 # should not be changed on a theory.
-docker exec -d "$NAME" sh -c "python3 /tmp/guest-relay.py $PORT $GUEST_IP $PORT $CPORT_IP > /tmp/relay.log 2>&1"
+# BIND 0.0.0.0 - the single-variable test that has never actually been run.
+#
+# The current data, all from runs where sshd was confirmed working:
+#
+#   container -> 172.17.0.2:2222 -> SSH-2.0-OpenSSH...   relay answers
+#   this host -> 172.17.0.2:2222 -> nothing
+#   this host -> 172.17.0.2:8006 -> HTTP 200 OK          same ip, different port
+#
+# 8006 is dockur's own listener and binds 0.0.0.0. Mine binds 172.17.0.2. Earlier I
+# changed this to 0.0.0.0 and reverted it when that run failed - but the reason that run
+# failed was sshd, not the bind (the frame showed CouldNotStopService). So the combination
+# 'working sshd + bind 0.0.0.0' has never been tested. sshd is now proven by the step
+# that prints Get-Service and Get-NetTCPConnection, so this changes one variable.
+docker exec -d "$NAME" sh -c "python3 /tmp/guest-relay.py $PORT $GUEST_IP $PORT 0.0.0.0 > /tmp/relay.log 2>&1"
 sleep 4
 docker exec "$NAME" sh -c "
   echo '  relay pid:' \$(pgrep -f guest-relay.py | tr '\n' ' ')
