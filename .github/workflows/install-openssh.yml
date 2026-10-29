@@ -61,7 +61,11 @@ jobs:
       - name: tooling
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-utils tesseract-ocr
+          # sshpass turns 'a banner appeared' into 'a login worked'. A banner only proves
+          # something spoke SSH on the port; sshpass proves the account, the password
+          # auth setting and the shell all work, and prints the failure reason if not.
+          sudo apt-get install -y -qq qemu-utils tesseract-ocr sshpass
+          sshpass -V | head -1
 
       - name: free disk space
         run: |
@@ -391,6 +395,23 @@ jobs:
           name: openssh-verify
           interval: "15"
           command: PORT=${{ github.event.inputs.port }} NAME=sshinst bash scripts/openssh-verify.sh
+
+      # THE REAL TEST, and the one that should have been here from the start.
+      #
+      # Everything above reads a banner: it can only show that something on the port spoke
+      # SSH first. It cannot show that the account exists, that password authentication is
+      # on, that the shell starts or that the session survives - and it reports all of
+      # those failures as the same 'no banner', which is how several rounds were spent
+      # adjusting a binding that was never the problem.
+      #
+      # sshpass logs in. If it fails it says why, in words that name the cause.
+      - name: log in over ssh
+        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: openssh-login
+          interval: 
+          command: PORT=${{ github.event.inputs.port }} bash scripts/ssh-login-test.sh
 
       - name: keep the final frame
         if: always()
