@@ -47,3 +47,18 @@ echo "  --- all established/半开 connections to the port ---"
 docker exec "$NAME" sh -c "(ss -tn 2>/dev/null || netstat -tn 2>/dev/null) | grep ':$PORT' | head -10" 2>&1 | sed "s/^/    /" || true
 echo "  --- is anything else listening on 8006 for comparison ---"
 docker exec "$NAME" sh -c "(ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep ':8006'" 2>&1 | sed "s/^/    /" || true
+
+echo "  --- NETNS CHECK (read on the host, no nesting) ---"
+relay_pid=$(docker exec "$NAME" pgrep -f guest-relay.py 2>/dev/null | head -1)
+nginx_pid=$(docker exec "$NAME" pgrep -x nginx 2>/dev/null | head -1)
+echo "    relay pid=${relay_pid:-none} nginx pid=${nginx_pid:-none}"
+docker exec "$NAME" sh -c "readlink /proc/\$1/ns/net 2>/dev/null; readlink /proc/1/ns/net 2>/dev/null" _ "${relay_pid:-1}" 2>/dev/null | sed "s/^/    relay/1 netns: /" || true
+if [ -n "$relay_pid" ]; then
+  docker exec "$NAME" readlink "/proc/$relay_pid/ns/net" 2>/dev/null | sed "s/^/    relay netns: /"
+fi
+if [ -n "$nginx_pid" ]; then
+  docker exec "$NAME" readlink "/proc/$nginx_pid/ns/net" 2>/dev/null | sed "s/^/    nginx netns: /"
+fi
+docker exec "$NAME" readlink /proc/1/ns/net 2>/dev/null | sed "s/^/    pid1  netns: /"
+echo "  --- which netns owns eth0 (the one docker forwards to) ---"
+docker exec "$NAME" sh -c "ip -o link show eth0 2>/dev/null | head -2" 2>&1 | sed "s/^/    /"
