@@ -96,6 +96,7 @@ jobs:
           docker run -d --name sshinst \
             --device=/dev/kvm --device=/dev/net/tun --cap-add NET_ADMIN \
             -e VERSION=11 -e DISK_SIZE=64G -e RAM_SIZE=8G -e CPU_CORES=4 \
+            -e USER_PORTS=${{ github.event.inputs.port }} \
             -p ${{ github.event.inputs.port }}:${{ github.event.inputs.port }} \
             -p 8006:8006 --stop-timeout 180 \
             -v "$GITHUB_WORKSPACE/storage:/storage" \
@@ -250,6 +251,22 @@ jobs:
           docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/f1.ppm >/dev/null 2>&1 || true
           docker cp sshinst:/tmp/f1.ppm shots/sshd.ppm >/dev/null 2>&1 || true
           python3 scripts/ppm2png.py shots/sshd.ppm shots/sshd.png >/dev/null 2>&1 || true
+
+      - name: confirm sshd inside the guest
+        run: |
+          set -x
+          port=${{ github.event.inputs.port }}
+          # Ask the guest itself before blaming the network. Get-Service shows whether
+          # the service is running, and Get-NetTCPConnection whether anything is
+          # listening on the port - the two failure modes look identical from outside.
+          check="Get-Service sshd | Select-Object Status,StartType | Format-List; Get-NetTCPConnection -State Listen | Where-Object LocalPort -eq  | Select-Object LocalAddress,LocalPort | Format-Table; (Get-Content C:\ProgramData\ssh\sshd_config) -match '^(Port|PasswordAuthentication)'"
+          echo "typing: $check"
+          docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock "$check" --enter
+          sleep 30
+          docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/c1.ppm >/dev/null 2>&1 || true
+          docker cp sshinst:/tmp/c1.ppm shots/verify.ppm >/dev/null 2>&1 || true
+          python3 scripts/ppm2png.py shots/verify.ppm shots/verify.png >/dev/null 2>&1 || true
+          ls -la shots/verify*
 
       - name: check the port from the host
         run: |
