@@ -120,6 +120,22 @@ jobs:
           docker cp scripts/shotsock.py sshinst:/tmp/shotsock.py
           docker cp scripts/guest-type.py sshinst:/tmp/guest-type.py
 
+      # A FRAME EVERY 30s, FOR THE WHOLE RUN.
+      #
+      # The wait loop reports one word per probe and keeps nothing, so a run that ends in
+      # 'unknown' or a timeout leaves no evidence at all. This runs alongside on its own
+      # clock and writes a timestamped PNG each interval, so the entire boot can be
+      # replayed afterwards in shot order. It decides nothing and never fails the job.
+      #
+      # Detached with nohup because the steps after it must not wait for it; it exits on
+      # its own deadline or when the container goes away.
+      - name: start the frame recorder
+        run: |
+          set -x
+          mkdir -p shots/frames
+          nohup bash scripts/frames-loop.sh > shots/frames/recorder.log 2>&1 &
+          echo "recorder started: pid "
+
       # STREAMED. This is the longest step in the job - thirteen minutes on the last
       # run - and GitHub publishes a job's log only when it finishes, so all of that
       # time was invisible; a 804s wait went unexamined for exactly that reason.
@@ -328,6 +344,16 @@ jobs:
           docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/f2.ppm >/dev/null 2>&1 || true
           docker cp sshinst:/tmp/f2.ppm shots/final.ppm >/dev/null 2>&1 || true
           python3 scripts/ppm2png.py shots/final.ppm shots/final.png >/dev/null 2>&1 || true
+      # Turn the frames into a timeline before uploading: one line per frame with its
+      # elapsed time and verdict, plus an index.html that shows them all in order.
+      - name: summarise the frames
+        if: always()
+        run: |
+          set -x
+          python3 scripts/frames-report.py shots/frames || true
+          echo "--- timeline (frame, t seconds, stage) ---"
+          cat shots/frames/frames.tsv 2>/dev/null || echo "  (no frames recorded)"
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
