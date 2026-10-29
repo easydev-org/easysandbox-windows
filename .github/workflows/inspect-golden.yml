@@ -1,0 +1,103 @@
+name: inspect-golden
+
+# Say what state a golden disk is actually in, without booting anything.
+#
+# WHY. Two runs started from the same artifact - same sha, same bootstate, same file
+# size after conversion, both logging
+#
+#   BdsDxe: starting Boot0005 "Windows Boot Manager" from HD(1,GPT,6388C80A-...)
+#
+# and the screens were nothing alike: one drew a 1 MB desktop within four seconds, the
+# other never painted a pixel - thirty-six frames of about 10 KB reading blank or
+# unknown for nineteen minutes.
+#
+# That difference is not configuration, so another workflow tweak cannot fix it. Either
+# the image on the artifact is unhealthy, or the conversion sometimes produces something
+# unbootable. Both are visible from the filesystem itself, and reading it costs a couple
+# of minutes instead of twenty.
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_run:
+        description: "Run id holding the golden-windows artifact"
+        required: true
+        default: "40746509253"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-utils libguestfs-tools
+          virt-ls --version | head -1
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: golden-windows
+          path: artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.inputs.artifact_run }}
+
+      - name: what is in the artifact
+        run: |
+          set -x
+          ls -la artifact/
+          find artifact -type f -printf "%10s %p\n" | sort -rn
+
+      - name: disk format and integrity
+        run: |
+          set -x
+          disk=$(find artifact -type f -size +1G | head -1)
+          echo "disk=$disk"
+          qemu-img info "$disk"
+          echo "--- qemu-img check ---"
+          qemu-img check "$disk" 2>&1 | tail -20 || true
+
+      - name: filesystem contents
+        run: |
+          set -x
+          disk=$(find artifact -type f -size +1G | head -1)
+          echo "=== partitions ==="
+          sudo virt-filesystems -a "$disk" --all --long -h || true
+          for part in /dev/sda3 /dev/sda4 /dev/sda1; do
+            echo "--- $part ---"
+            sudo virt-ls -a "$disk" -m "$part" / 2>&1 | head -25 || true
+          done
+
+      - name: is the install complete
+        run: |
+          set -x
+          disk=$(find artifact -type f -size +1G | head -1)
+          echo "=== sda3 root ==="
+          sudo virt-ls -a "$disk" -m /dev/sda3 / 2>&1 | head -40 || true
+          echo "=== /Windows ==="
+          sudo virt-ls -a "$disk" -m /dev/sda3 /Windows 2>&1 | head -30 || true
+          echo "=== /Users ==="
+          sudo virt-ls -a "$disk" -m /dev/sda3 /Users 2>&1 | head -15 || true
+
+      - name: bootstate contents
+        run: |
+          set -x
+          state=$(find artifact -name "*.bootstate.tar.gz" | head -1)
+          echo "state=$state"
+          [ -n "$state" ] && tar tvzf "$state"
+          tmp=$(mktemp -d)
+          [ -n "$state" ] && tar xzf "$state" -C "$tmp"
+          ls -la "$tmp"
+          if [ -f "$tmp/windows.vars" ]; then
+            echo "--- boot entries in windows.vars ---"
+            strings "$tmp/windows.vars" | grep -iaE "Boot[0-9A-Fa-f]{4}|Windows Boot Manager" | head -20 || true
+          fi
+          echo "--- ver / base ---"
+          cat "$tmp/windows.ver" 2>/dev/null; echo
+          cat "$tmp/windows.base" 2>/dev/null; echo
