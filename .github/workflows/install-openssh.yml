@@ -133,17 +133,67 @@ jobs:
       - name: open PowerShell via Run
         run: |
           set -x
-          # Win+R, then "powershell", then Enter. The Run box takes keystrokes as soon
-          # as it is up, and PowerShell starts in the user's context - which is the
-          # docker account, an administrator.
-          docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock --raw "sendkey meta_l-r"
-          sleep 3
-          docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock "powershell" --enter
-          sleep 15
-          docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/ps.ppm >/dev/null 2>&1 || true
-          docker cp sshinst:/tmp/ps.ppm shots/ps.ppm >/dev/null 2>&1 || true
-          python3 scripts/ppm2png.py shots/ps.ppm shots/ps.png >/dev/null 2>&1 || true
-          ls -la shots/
+          # THE PREVIOUS RUN TYPED INTO NOTHING.
+          #
+          # Every step reported success and winget never ran: the frames show the
+          # guest was sitting on \"Please keep your PC on and plugged in\" - Windows
+          # Update, which starts by itself right after the first desktop - while
+          # Win+R and the commands went into it. The proof is the last frame: File
+          # Explorer open on the Shared folder, because typed characters were being
+          # read as a Start-menu search instead.
+          #
+          # docker exec returning 0 only means the keys were handed to QEMU. It says
+          # nothing about whether the guest had a window to put them in. So: settle
+          # first, close any menu, and CONFIRM a PowerShell window before typing at it.
+          one() { docker cp scripts/guest-type.py sshinst:/tmp/guest-type.py >/dev/null 2>&1 || true; }
+          shot() {
+            docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/$1.ppm >/dev/null 2>&1 || true
+            docker cp sshinst:/tmp/$1.ppm shots/$1.ppm >/dev/null 2>&1 || true
+            python3 scripts/ppm2png.py shots/$1.ppm shots/$1.png >/dev/null 2>&1 || true
+            python3 scripts/screen-read.py shots/$1.ppm 2>/dev/null || echo unknown
+          }
+          one
+
+          # Let the post-install updates finish: the desktop at 780s was followed by
+          # a full-screen update prompt, and typing during it does nothing.
+          echo "settling for 5 minutes before touching the keyboard"
+          for i in 1 2 3 4 5; do
+            sleep 60
+            echo "  settle ${i}/5: $(shot settle)"
+          done
+          # Baseline taken AFTER settling: this is the bare-desktop frame every later
+          # comparison is made against. Comparing with the frame from before the
+          # update would flag any change at all as success.
+          shot baseline >/dev/null
+
+          # Escape closes the Start menu or any overlay, so Win+R reaches the shell.
+          docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock --raw "sendkey esc"
+          sleep 2
+
+          # Try Run -> powershell, twice, checking the screen each time. The check is
+          # that the frame gains a window: screen-read reports 'desktop' for a bare
+          # desktop, and a terminal over it stops it being uniform.
+          for attempt in 1 2 3; do
+            echo "launch attempt ${attempt}"
+            docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock --raw "sendkey esc"
+            sleep 1
+            docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock --raw "sendkey meta_l-r"
+            sleep 4
+            shot runbox >/dev/null
+            docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock "powershell" --enter
+            sleep 18
+            s=$(shot ps)
+            echo "  after attempt ${attempt}: stage=${s}"
+            # A PowerShell window is dark in the upper-left quadrant; the classifier
+            # cannot name it, so compare the frame against the desktop frame instead:
+            # a run box or terminal changes enough pixels to shrink the taskbar run.
+            if [ -s shots/ps.ppm ] && [ -s shots/baseline.ppm ]; then
+              if ! cmp -s shots/ps.ppm shots/baseline.ppm; then
+                echo "  screen changed after launching - assuming a window is up"
+                break
+              fi
+            fi
+          done
 
       - name: winget install OpenSSH Server
         run: |
