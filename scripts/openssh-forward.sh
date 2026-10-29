@@ -64,13 +64,26 @@ echo "--- ip_forward ---"
 docker exec "$NAME" sh -c 'sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true'
 docker exec "$NAME" sh -c 'cat /proc/sys/net/ipv4/ip_forward' 2>/dev/null | sed 's/^/  ip_forward=/' || true
 
+# INSERTED AT POSITION 1, NOT APPENDED - and this is why every earlier attempt
+# "succeeded" while the host saw nothing.
+#
+# docker publishes a port by adding its own PREROUTING jump:
+#   -A PREROUTING -m addrtype --dst-type LOCAL -j DOCKER
+#   -A DOCKER ! -i docker -p tcp --dport 2222 -j DNAT --to-destination 172.17.0.2:2222
+#
+# Appending my rule put it AFTER that jump, so the packet had already been rewritten to
+# the container's own address - no longer 'dst-type LOCAL' - and my rule could never
+# match. The rules were present, correct, and unreachable.
+#
+# -I PREROUTING 1 makes the packet be judged before docker's jump: straight to the
+# guest, instead of to the container address where nothing listens.
 echo "--- installing the nat and filter rules (tcp/$PORT only) ---"
 docker exec "$NAME" sh -c "
   iptables -t nat -N QEMU_DNAT 2>/dev/null || true
   iptables -t nat -F QEMU_DNAT
 
-  iptables -t nat -C PREROUTING -m addrtype --dst-type LOCAL -p tcp --dport '$PORT' -j QEMU_DNAT 2>/dev/null ||
-  iptables -t nat -A PREROUTING ! -i '$BRIDGE' -m addrtype --dst-type LOCAL -p tcp --dport '$PORT' -m comment --comment QEMU_DNAT -j QEMU_DNAT
+  while iptables -t nat -D PREROUTING -m comment --comment QEMU_DNAT -j QEMU_DNAT 2>/dev/null; do :; done
+  iptables -t nat -I PREROUTING 1 ! -i '$BRIDGE' -m addrtype --dst-type LOCAL -p tcp --dport '$PORT' -m comment --comment QEMU_DNAT -j QEMU_DNAT
 
   iptables -t nat -C POSTROUTING -s '$BRIDGE_IP/$PREFIX' -j MASQUERADE 2>/dev/null ||
   iptables -t nat -A POSTROUTING -s '$BRIDGE_IP/$PREFIX' ! -d '$BRIDGE_IP/$PREFIX' ! -o '$BRIDGE' -m comment --comment QEMU_DNAT -j MASQUERADE
@@ -85,8 +98,9 @@ docker exec "$NAME" sh -c "
 
   echo '  --- nat QEMU_DNAT ---'
   iptables -t nat -S QEMU_DNAT 2>/dev/null
-  echo '  --- nat PREROUTING/POSTROUTING (ours) ---'
-  iptables -t nat -S PREROUTING 2>/dev/null | grep QEMU_DNAT || true
+  echo '  --- nat PREROUTING in order (ours must be first) ---'
+  iptables -t nat -S PREROUTING 2>/dev/null | head -8
+  echo '  --- nat POSTROUTING (ours) ---'
   iptables -t nat -S POSTROUTING 2>/dev/null | grep QEMU_DNAT || true
   echo '  --- filter FORWARD (ours) ---'
   iptables -S FORWARD 2>/dev/null | grep '172.30.' || true
