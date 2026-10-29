@@ -35,6 +35,10 @@ on:
         description: "sshd port inside the guest (also the forwarded host port)"
         required: false
         default: "2222"
+      export_disk:
+        description: "Export the disk after the work, as a new golden artifact"
+        required: false
+        default: "yes"
 
 permissions:
   contents: read
@@ -354,6 +358,36 @@ jobs:
           echo "--- timeline (frame, t seconds, stage) ---"
           cat shots/frames/frames.tsv 2>/dev/null || echo "  (no frames recorded)"
 
+      # EXPORT THE WORKED-ON DISK, so this never has to be repeated.
+      #
+      # Every attempt so far has started from the same golden image and spent ~20
+      # minutes booting Windows just to arrive at the same desktop. Once the work is
+      # done the disk itself is the result, and re-running from it skips nothing about
+      # the boot but does skip everything after it - and more importantly it makes the
+      # state durable instead of being thrown away with the container.
+      #
+      # The guest is stopped first, or the filesystem is mid-write and the copy is not
+      # a snapshot of anything. bootstate goes with it for the same reason it does in
+      # bake: windows.vars carries the UEFI boot entry and the disk will not start
+      # without it.
+      - name: export the disk
+        if: always() && github.event.inputs.export_disk == 'yes'
+        run: |
+          set -x
+          docker stop -t 180 sshinst || true
+          mkdir -p out
+          docker cp sshinst:/storage/data.img out/data.img
+          ls -la out/
+          qemu-img convert -O qcow2 out/data.img out/windows-openssh.qcow2
+          qemu-img info out/windows-openssh.qcow2 | head -6
+          rm -f out/data.img
+          for f in windows.vars windows.ver windows.base windows.mac windows.rom; do
+            docker cp "sshinst:/storage/$f" "out/$f" 2>/dev/null || echo "  missing $f"
+          done
+          ls -la out/
+          tar czf out/windows-openssh.qcow2.bootstate.tar.gz             -C out windows.vars windows.ver windows.base windows.mac windows.rom 2>/dev/null || true
+          ls -la out/
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -361,6 +395,17 @@ jobs:
           path: shots/**
           if-no-files-found: warn
           retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event.inputs.export_disk == 'yes'
+        with:
+          name: golden-windows-openssh
+          path: |
+            out/windows-openssh.qcow2
+            out/windows-openssh.qcow2.bootstate.tar.gz
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
 
       - name: stop
         if: always()
