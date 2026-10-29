@@ -83,14 +83,28 @@ docker exec "$NAME" sh -c 'cat /proc/sys/net/ipv4/ip_forward' 2>/dev/null | sed 
 # container, so the listener alone is the whole answer. The DNAT is removed, and any
 # copy an earlier run installed is removed too - leaving it would silently steal the
 # traffic again.
-echo "--- removing any nat rules an earlier run installed ---"
+echo "--- removing EVERY nat rule an earlier run installed ---"
+# THE OLD CLEANUP MISSED MOST OF THEM, and that is why the relay looked unreachable
+# while being perfectly healthy. It deleted by a fully specified rule:
+#     -D PREROUTING -m comment --comment QEMU_DNAT -j QEMU_DNAT
+# which only matches a jump whose target is QEMU_DNAT. The run printed two survivors:
+#     -A PREROUTING ! -i docker -m addrtype --dst-type LOCAL -j QEMU_DNAT
+#     -A PREROUTING -i docker -m comment --comment QEMU_DNAT -j DNAT --to-destination 172.17.0.1
+# Neither matches that pattern, and the first hijacks exactly what docker forwards: a
+# packet for 172.17.0.2:2222 IS dst-type LOCAL, so it was handed on to the guest instead
+# of reaching the relay listening on that address - the listener up, answering itself,
+# never seeing outside traffic.
+#
+# So delete by LINE NUMBER, walking each chain backwards, matching only the comment.
 docker exec "$NAME" sh -c "
-  while iptables -t nat -D PREROUTING -m comment --comment QEMU_DNAT -j QEMU_DNAT 2>/dev/null; do :; done
+  for chain in PREROUTING POSTROUTING OUTPUT; do
+    nums=$(iptables -t nat -L $chain --line-numbers -n 2>/dev/null | awk '/QEMU_DNAT/ {print $1}' | sort -rn)
+    for n in $nums; do iptables -t nat -D $chain $n 2>/dev/null || true; done
+  done
   iptables -t nat -F QEMU_DNAT 2>/dev/null || true
   iptables -t nat -X QEMU_DNAT 2>/dev/null || true
-  while iptables -t nat -D POSTROUTING -m comment --comment QEMU_DNAT -j MASQUERADE 2>/dev/null; do :; done
-  echo '  remaining PREROUTING:'
-  iptables -t nat -S PREROUTING 2>/dev/null | head -6
+  echo '  PREROUTING after cleanup:'
+  iptables -t nat -S PREROUTING 2>/dev/null | head -8
 " 2>&1 | sed 's/^/  /'
 
 echo "--- container -> guest:$PORT ---"
