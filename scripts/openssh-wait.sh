@@ -10,7 +10,7 @@
 set -u
 
 NAME="${NAME:-sshinst}"
-LIMIT="${BOOT_WAIT:-900}"
+LIMIT="${BOOT_WAIT:-1800}"
 SHOTS="${SHOTS:-shots}"
 OCR="${OCR:-scripts/screen-read.py}"
 MON="${MON:-/run/shm/monitor.sock}"
@@ -30,6 +30,8 @@ probe() {
 
 start=$SECONDS
 stage=""
+last_change=$SECONDS
+prev=""
 while : ; do
   waited=$((SECONDS - start))
   if [ "$waited" -ge "$LIMIT" ]; then
@@ -37,7 +39,21 @@ while : ; do
     break
   fi
   stage=$(probe boot)
-  echo "t=${waited}s stage=${stage}"
+  # A PROGRESSING INSTALL IS NOT A STUCK ONE.
+  #
+  # Measured desktop times on this same disk: 637, 780, 804, 838, 883, 910s - and a
+  # 900s limit cut the last run off at 914s while the screen still said 'installing'.
+  # That is a cap set too close to the observed maximum, not a fault. The limit is now
+  # generous, and the thing worth reporting is whether the picture is still changing:
+  # an install that keeps repainting is working, whatever the clock says.
+  if [ "$stage" != "$prev" ]; then
+    last_change=$SECONDS
+    changed="$((SECONDS - start))s"
+  else
+    changed="$((SECONDS - last_change))s ago"
+  fi
+  echo "t=${waited}s stage=${stage} (last change ${changed})"
+  prev="$stage"
   [ "$stage" = "desktop" ] && break
   sleep 15
 done
