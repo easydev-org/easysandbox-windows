@@ -294,98 +294,40 @@ jobs:
           docker cp sshinst:/tmp/f1.ppm shots/sshd.ppm >/dev/null 2>&1 || true
           python3 scripts/ppm2png.py shots/sshd.ppm shots/sshd.png >/dev/null 2>&1 || true
 
-      - name: what does qemu forward
-        run: |
-          set -x
-          # The guest says sshd is Running on Port 2222, and the host still sees nothing
-          # on 2222. That leaves the forwarding layer, so read QEMU's own arguments:
-          # netdev hostfwd entries are the only thing that can carry a host port into
-          # the guest.
-          # NO BRACKET EXPRESSIONS passed through sh -c. `[^ ]` gets mangled twice in
-          # this nesting and every line came back as "hostfwd=[^", which is useless.
-          # Split the command line on spaces with tr and grep the pieces by prefix.
-          docker exec sshinst sh -c 'pid=$(pgrep -f qemu-system | head -1); [ -n "$pid" ] && tr "\0" "\n" < /proc/$pid/cmdline' 2>/dev/null > /tmp/cmdline.txt || true
-          echo "--- argv entries mentioning forwarding ---"
-          grep -iE "hostfwd|netdev|user,id" /tmp/cmdline.txt | sed 's/^/  /' || echo "  (none)"
-          echo "--- argv entries mentioning 2222 ---"
-          grep "2222" /tmp/cmdline.txt | sed 's/^/  /' || echo "  (none - QEMU has no rule for this port)"
-          echo "--- full argv, one per line ---"
-          cat /tmp/cmdline.txt | head -60 | sed 's/^/  /' || true
-          echo "--- all hostfwd fragments ---"
-          docker exec sshinst sh -c 'ps -ef | grep -o "hostfwd=[^ ,]*" | head -10' 2>&1 | sed 's/^/  /' || true
-          echo "--- docker port ---"
-          docker port sshinst || true
-          echo "--- docker logs, network lines ---"
-          docker logs sshinst 2>&1 | grep -iE "mode|guest:|forward|user-mode|USER_PORTS" | head -10 || true
-
-      # THE FORWARD THAT WAS MISSING.
+      # STREAMED, like the wait above. These are the steps that answer the port
+      # question, and a step log is published only when the whole job ends - which is
+      # why every answer about this port arrived after the fact, and why I chased the
+      # wrong layer twice.
       #
-      # In NAT mode the guest gets its own address (the log says "Guest: 172.30.0.2")
-      # and QEMU runs with a plain tap netdev and no hostfwd:
-      #
-      #   -netdev tap,id=hostnet0,ifname=qemu,script=no,downscript=no
-      #
-      # so publishing 2222 with docker only reaches the container. USER_PORTS cannot
-      # help - its documentation scopes it to user-mode networking. One DNAT rule in
-      # the container's nat table is what carries the published port to the guest, and
-      # it needs NET_ADMIN, which this container already has.
-      - name: forward the published port into the guest
-        run: |
-          set -x
-          PORT=${{ github.event.inputs.port }} NAME=sshinst bash scripts/openssh-dnat.sh
+      # Measured so far: the guest answers on 127.0.0.1:2222 (True); the container
+      # reaches 172.30.0.2:2222 (open); the host sees nothing on the published port.
+      # QEMU has no hostfwd, because NET_ADMIN makes dockur use a tap bridge with the
+      # guest on its own address. So what is missing is a process listening on the
+      # container port: docker proxy delivers the connection where nothing is bound,
+      # which is why the nat rule had no effect.
+      - name: probe the network path and start the relay
+        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: openssh-forward
+          interval: "15"
+          command: PORT=${{ github.event.inputs.port }} NAME=sshinst bash scripts/openssh-forward.sh
 
-      - name: test ssh from inside the guest
-        run: |
-          set -x
-          port=${{ github.event.inputs.port }}
-          # If sshd answers itself on 127.0.0.1 the service is fine and the problem is
-          # purely the forward. Test-NetConnection reports True/False without opening
-          # an interactive session.
-          t="Test-NetConnection -ComputerName 127.0.0.1 -Port $port -InformationLevel Quiet"
-          docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock "$t" --enter
-          sleep 25
-          docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/t1.ppm >/dev/null 2>&1 || true
-          docker cp sshinst:/tmp/t1.ppm shots/loopback.ppm >/dev/null 2>&1 || true
-          python3 scripts/ppm2png.py shots/loopback.ppm shots/loopback.png >/dev/null 2>&1 || true
-          ls -la shots/loopback*
+      - name: read an ssh banner from the host
+        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: openssh-verify
+          interval: "15"
+          command: PORT=${{ github.event.inputs.port }} NAME=sshinst bash scripts/openssh-verify.sh
 
-      - name: confirm sshd inside the guest
+      - name: keep the final frame
+        if: always()
         run: |
           set -x
-          port=${{ github.event.inputs.port }}
-          # Ask the guest itself before blaming the network. Get-Service shows whether
-          # the service is running, and Get-NetTCPConnection whether anything is
-          # listening on the port - the two failure modes look identical from outside.
-          check="Get-Service sshd | Select-Object Status,StartType | Format-List; Get-NetTCPConnection -State Listen | Where-Object LocalPort -eq  | Select-Object LocalAddress,LocalPort | Format-Table; (Get-Content C:\ProgramData\ssh\sshd_config) -match '^(Port|PasswordAuthentication)'"
-          echo "typing: $check"
-          docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock "$check" --enter
-          sleep 30
-          docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/c1.ppm >/dev/null 2>&1 || true
-          docker cp sshinst:/tmp/c1.ppm shots/verify.ppm >/dev/null 2>&1 || true
-          python3 scripts/ppm2png.py shots/verify.ppm shots/verify.png >/dev/null 2>&1 || true
-          ls -la shots/verify*
-
-      - name: check the port from the host
-        run: |
-          set -x
-          port=${{ github.event.inputs.port }}
-          # -p $port:$port is published, and the base layer forwards a published port
-          # to the guest port of the same number, so a working sshd shows up here as a
-          # real SSH banner. A bare TCP connect is not enough: the forwarder completes
-          # the handshake on its own, which produced false positives earlier.
-          for i in $(seq 1 12); do
-            banner=$(timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/$port && head -c 64 <&3" 2>/dev/null | tr -d '\r\n' || true)
-            case "$banner" in
-              SSH-*) echo "ssh banner after $((i*10))s: $banner"; echo "SSH_OK" > ssh-ok ;;
-            esac
-            [ -f ssh-ok ] && break
-            sleep 10
-          done
-          [ -f ssh-ok ] || echo "no SSH banner on 127.0.0.1:$port"
           docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/f2.ppm >/dev/null 2>&1 || true
           docker cp sshinst:/tmp/f2.ppm shots/final.ppm >/dev/null 2>&1 || true
           python3 scripts/ppm2png.py shots/final.ppm shots/final.png >/dev/null 2>&1 || true
-
       - uses: actions/upload-artifact@v4
         if: always()
         with:
