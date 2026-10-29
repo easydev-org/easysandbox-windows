@@ -1,23 +1,26 @@
 #!/usr/bin/env bash
 # Make the guest's sshd reachable on the container's published port.
 #
-# THE MEASUREMENTS, in the order they were taken:
+# WHAT IS MEASURED, and it has not changed through four attempts:
 #
-#   guest side         Test-NetConnection 127.0.0.1:2222        -> True
-#   container -> guest direct connect 172.30.0.2:2222           -> open
-#   host -> container  read an SSH banner on 127.0.0.1:2222     -> nothing
+#   guest side          Test-NetConnection 127.0.0.1:2222   -> True
+#   container -> guest  connect 172.30.0.2:2222             -> "Connection succeeded!"
+#   host -> container   read a banner on 127.0.0.1:2222     -> nothing
 #
-# QEMU's own argv has no hostfwd, because NET_ADMIN makes dockur build a tap bridge and
-# give the guest its own address ('Mode: NAT', 'Guest: 172.30.0.2').
+# QEMU runs '-netdev tap,...' with no hostfwd, because NET_ADMIN makes dockur bridge the
+# guest onto its own address. So docker publishes 2222, forwards into the container, and
+# nothing is bound there. nat-table DNAT did not help: docker's userland proxy hands the
+# connection straight into the namespace, so it never appears as forwarded traffic.
 #
-# So the container CAN reach sshd and the gap is the container's own port 2222: docker
-# publishes it and forwards into the container, where nothing is listening. nat-table
-# DNAT was tried first and did not help - docker's userland proxy terminates the
-# connection before it becomes forwarded traffic in PREROUTING.
+# The relay is the right shape - listen here, connect upstream - but starting it with
+# 'nohup python3 ... &' inside docker exec did NOT work, and the evidence was in the
+# failure output: '(no relay log)' and '(nothing on that port)'. The backgrounded child
+# of an exec dies with that exec.
 #
-# The fix that matches the measurement is an application-level relay inside the
-# container: listen on the published port, hand each connection to the guest. It uses
-# only what has already been shown to work.
+# So the relay is started as a detached session with setsid and its output redirected by
+# the shell that launches it, and then the listener is CONFIRMED before moving on - a
+# relay that is not listening is worse than none, because everything downstream then
+# tests the wrong thing.
 set -eu
 
 NAME="${NAME:-sshinst}"
@@ -39,15 +42,39 @@ docker exec "$NAME" sh -c "
   fi
 " 2>&1 | sed 's/^/  /'
 
-echo "--- starting the relay 0.0.0.0:$PORT -> $guest:$PORT ---"
+echo "--- installing the relay ---"
 docker cp "$(dirname "$0")/guest-relay.py" "$NAME:/tmp/guest-relay.py"
+
+echo "--- starting it detached ---"
+# docker exec -d is the supported way to leave a process running in a container: the exec
+# returns immediately and the process is not tied to it. The first attempt used
+# 'nohup ... &' inside a foreground exec, and the child died with the exec - visible in
+# the failure output as '(no relay log)' and '(nothing on that port)'.
+docker exec "$NAME" sh -c 'pkill -f guest-relay.py 2>/dev/null || true; rm -f /tmp/relay.log' || true
+docker exec -d "$NAME" sh -c "python3 /tmp/guest-relay.py $PORT $guest $PORT > /tmp/relay.log 2>&1"
+sleep 4
 docker exec "$NAME" sh -c "
-  pkill -f guest-relay.py 2>/dev/null || true
-  nohup python3 /tmp/guest-relay.py $PORT $guest $PORT > /tmp/relay.log 2>&1 &
-  sleep 2
-  echo '  relay pid:' \$(pgrep -f guest-relay.py | head -1)
-  echo '  listening sockets:'
-  (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) | grep $PORT | sed 's/^/    /' || echo '    (none)'
-  echo '  relay log:'
-  cat /tmp/relay.log 2>/dev/null | sed 's/^/    /' || true
+  echo '  pid: '\$(pgrep -f guest-relay.py | tr '\n' ' ')
+  echo '  log:'
+  sed 's/^/    /' /tmp/relay.log 2>/dev/null || echo '    (no log written)'
+" 2>&1 | sed 's/^/  /'
+
+echo "--- is it actually listening? ---"
+docker exec "$NAME" sh -c "
+  if (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q ':$PORT '; then
+    (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep ':$PORT ' | sed 's/^/  /'
+    echo '  LISTENING'
+  else
+    echo '  NOT LISTENING - the relay did not come up'
+    exit 1
+  fi
+" 2>&1 | sed 's/^/  /'
+
+echo "--- relay the port from inside the container (should now answer) ---"
+docker exec "$NAME" sh -c "
+  if command -v nc >/dev/null 2>&1; then
+    timeout 8 nc 127.0.0.1 $PORT < /dev/null 2>&1 | head -1 || true
+  else
+    timeout 8 sh -c \"exec 3<>/dev/tcp/127.0.0.1/$PORT; head -c 60 <&3\" 2>/dev/null || true
+  fi
 " 2>&1 | sed 's/^/  /'
