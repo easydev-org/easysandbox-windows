@@ -25,6 +25,19 @@ if [ -z "$guest" ]; then
 fi
 echo "guest address: $guest, port: $PORT"
 
+# REACH THE GUEST FIRST. If the container cannot open a TCP connection to the guest's
+# sshd, no nat rule will help - the fault would be the tap/bridge or the guest's
+# firewall, not the forward. Checked before touching iptables so the two failures are
+# never confused again.
+echo "--- can the container reach the guest directly? ---"
+docker exec "$NAME" sh -c "
+  if command -v nc >/dev/null 2>&1; then
+    nc -z -w 5 $guest $PORT && echo 'direct: open' || echo 'direct: closed'
+  else
+    timeout 5 sh -c \"echo > /dev/tcp/$guest/$PORT\" 2>/dev/null && echo 'direct: open' || echo 'direct: closed'
+  fi
+" 2>&1 | sed 's/^/  /'
+
 # Redirect traffic arriving on the container's port to the guest's sshd. PREROUTING
 # covers packets from the host, OUTPUT covers the container itself - both are needed
 # by different paths, and adding both is cheap.
