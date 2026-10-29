@@ -63,6 +63,18 @@ fi
 echo "--- relay self-test (container side) ---"
 PORT="$PORT" NAME="$NAME" bash "$(dirname "$0")/relay-selftest.sh"
 
+# THREE OUTCOMES, NOT ONE.
+#
+# Every previous check reported 'no banner' for a failed connect and for a silent peer
+# alike, with a 4-6s read timeout. In this very run the 8006 control returned
+# HTTP/1.1 200 OK from the same address at the same minute - and the only difference is
+# that it WRITES a request before reading. So the connection path may well be fine and
+# what was measured all along is silence on the socket.
+#
+# This says which of the three happened instead of collapsing them.
+echo "--- tcp stage probe on $HOST:$PORT ---"
+PORT="$PORT" HOST="$HOST" WAIT=25 bash "$(dirname "$0")/probe-tcp.sh"
+
 echo "--- polling $HOST:$PORT for a banner ---"
 while [ "$SECONDS" -lt "$DEADLINE" ]; do
   banner=$(banner_at "$HOST" "$PORT")

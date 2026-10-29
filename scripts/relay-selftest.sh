@@ -32,19 +32,13 @@ docker exec "$NAME" sh -c "cat /tmp/relay.log 2>/dev/null" 2>/dev/null | sed "s/
 # and the relay changed nothing.
 cid=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$NAME" 2>/dev/null || true)
 echo "  --- control: this machine -> container 8006 (native dockur listener) ---"
+# Writes a request before reading. That is the only difference from the checks that
+# reported "nothing" for the same address in the same run, and it is why this one
+# gets an answer - which is what made the two results look contradictory.
 if [ -n "$cid" ]; then
-  c=$(timeout 5 bash -c "exec 3<>/dev/tcp/$cid/8006; printf 'GET / HTTP/1.0\r\n\r\n' >&3; head -c 40 <&3" 2>/dev/null | tr -d "\r\n" || true)
-
+  c=$(timeout 6 bash -c "exec 3<>/dev/tcp/$cid/8006; printf 'GET / HTTP/1.0\r\n\r\n' >&3; head -c 40 <&3" 2>/dev/null | tr -d "\r\n" || true)
   echo "    -> $cid:8006 -> ${c:-nothing}"
 fi
-  c=$(timeout 5 bash -c "exec 3<>/dev/tcp/$cid/8006; printf 'GET / HTTP/1.0\r\n\r\n' >&3; head -c 40 <&3" 2>/dev/null | tr -d "\r\n" || true)
-
-echo "    -> 127.0.0.1:8006 -> ${c2:-nothing}"
-
-echo "  --- filter INPUT in the container (does anything drop 2222?) ---"
-docker exec "$NAME" sh -c "iptables -S INPUT 2>/dev/null | head -20" 2>&1 | sed "s/^/    /"
-echo "  --- all established/半开 connections to the port ---"
-docker exec "$NAME" sh -c "(ss -tn 2>/dev/null || netstat -tn 2>/dev/null) | grep ':$PORT' | head -10" 2>&1 | sed "s/^/    /" || true
 echo "  --- is anything else listening on 8006 for comparison ---"
 docker exec "$NAME" sh -c "(ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep ':8006'" 2>&1 | sed "s/^/    /" || true
 
