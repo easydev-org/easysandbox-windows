@@ -12,9 +12,13 @@
 #       forwarding is off by default; without it nothing crosses eth0 <-> bridge
 #   PREROUTING ! -i BRIDGE -m addrtype --dst-type LOCAL -j QEMU_DNAT
 #       the ! -i guard stops traffic arriving FROM the bridge being re-DNAT'd into it
-#   QEMU_DNAT -j DNAT --to-destination GUEST_IP
-#       no ':port' - the port is preserved, which is what makes every published port
-#       work rather than only the one that was hard-coded
+#   QEMU_DNAT -p tcp --dport PORT -j DNAT --to-destination GUEST_IP:PORT
+#       SCOPED TO ONE PORT, which is where this deviates from upstream on purpose.
+#       sandbox.sh DNATs everything that arrives for a local address, because that
+#       image has no VNC at all: Containerfile sets DISPLAY=none, drops the noVNC
+#       assets and never exposes 8006. This workflow does publish 8006 for the web
+#       console, and a blanket DNAT would send those connections to the guest, which
+#       has nothing on 8006 - killing the console. So the rule names the port.
 #   POSTROUTING -s BRIDGE_IP/PREFIX ! -d ... ! -o BRIDGE -j MASQUERADE
 #       the guest's replies need source NAT, or they leave with an address the sender
 #       cannot route back to
@@ -60,18 +64,18 @@ echo "--- ip_forward ---"
 docker exec "$NAME" sh -c 'sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true'
 docker exec "$NAME" sh -c 'cat /proc/sys/net/ipv4/ip_forward' 2>/dev/null | sed 's/^/  ip_forward=/' || true
 
-echo "--- installing the nat and filter rules ---"
+echo "--- installing the nat and filter rules (tcp/$PORT only) ---"
 docker exec "$NAME" sh -c "
   iptables -t nat -N QEMU_DNAT 2>/dev/null || true
   iptables -t nat -F QEMU_DNAT
 
-  iptables -t nat -C PREROUTING -m addrtype --dst-type LOCAL -j QEMU_DNAT 2>/dev/null ||
-  iptables -t nat -A PREROUTING ! -i '$BRIDGE' -m addrtype --dst-type LOCAL -m comment --comment QEMU_DNAT -j QEMU_DNAT
+  iptables -t nat -C PREROUTING -m addrtype --dst-type LOCAL -p tcp --dport '$PORT' -j QEMU_DNAT 2>/dev/null ||
+  iptables -t nat -A PREROUTING ! -i '$BRIDGE' -m addrtype --dst-type LOCAL -p tcp --dport '$PORT' -m comment --comment QEMU_DNAT -j QEMU_DNAT
 
   iptables -t nat -C POSTROUTING -s '$BRIDGE_IP/$PREFIX' -j MASQUERADE 2>/dev/null ||
   iptables -t nat -A POSTROUTING -s '$BRIDGE_IP/$PREFIX' ! -d '$BRIDGE_IP/$PREFIX' ! -o '$BRIDGE' -m comment --comment QEMU_DNAT -j MASQUERADE
 
-  iptables -t nat -A QEMU_DNAT -m comment --comment QEMU_DNAT -j DNAT --to-destination '$GUEST_IP'
+  iptables -t nat -A QEMU_DNAT -p tcp --dport '$PORT' -m comment --comment QEMU_DNAT -j DNAT --to-destination '$GUEST_IP':'$PORT'
 
   iptables -t filter -C FORWARD -s '$BRIDGE_IP/$PREFIX' -j ACCEPT 2>/dev/null ||
   iptables -t filter -A FORWARD -s '$BRIDGE_IP/$PREFIX' -i '$BRIDGE' ! -o '$BRIDGE' -j ACCEPT
