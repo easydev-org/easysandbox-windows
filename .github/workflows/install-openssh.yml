@@ -149,10 +149,32 @@ jobs:
         run: |
           set -x
           port=${{ github.event.inputs.port }}
-          # winget needs the App Installer package and a working source. --accept-*
-          # suppresses the interactive prompts, which cannot be answered by keystrokes
-          # reliably.
-          cmd1="winget install --id Microsoft.OpenSSH.Beta --exact --accept-source-agreements --accept-package-agreements --silent"
+          # SEARCH FIRST, INSTALL SECOND.
+          #
+          # The previous attempt used --id Microsoft.OpenSSH.Beta, taken from a
+          # third-party winget web page, and the guest answered:
+          #     No package found matching input criteria.
+          # with a preceding note that the msstore source wants a geographic region -
+          # so it was querying a source that cannot serve this package at all.
+          #
+          # The real ID is therefore looked up inside the guest rather than assumed,
+          # and the result is read back from a screenshot.
+          search="winget search OpenSSH --source winget --accept-source-agreements"
+          echo "typing: $search"
+          docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock "$search" --enter
+          sleep 45
+          docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/s1.ppm >/dev/null 2>&1 || true
+          docker cp sshinst:/tmp/s1.ppm shots/search.ppm >/dev/null 2>&1 || true
+          python3 scripts/ppm2png.py shots/search.ppm shots/search.png >/dev/null 2>&1 || true
+          ls -la shots/
+
+      - name: winget install OpenSSH Server
+        run: |
+          set -x
+          # --source winget keeps it away from msstore, which demands a region and does
+          # not carry this package. --disable-interactivity stops winget waiting for a
+          # keypress nobody can give.
+          cmd1="winget install --id Microsoft.OpenSSH.Beta --exact --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity"
           echo "typing: $cmd1"
           docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock "$cmd1" --enter
           echo "waiting for winget (up to 6 minutes)"
