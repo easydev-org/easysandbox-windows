@@ -39,6 +39,13 @@ on:
 permissions:
   contents: read
   actions: read
+  # checks: write is what lets log-stream create the check run it streams into. Its
+  # absence is silent: the action answers
+  #   cannot create a check run (403): Resource not accessible by integration
+  # and carries on without streaming, so the only visible symptom is a check run that
+  # never appears - which is exactly what happened here. The same note already exists
+  # in bake-golden.yml; this workflow was missing the line.
+  checks: write
 
 jobs:
   install:
@@ -123,11 +130,12 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           name: openssh-wait
           interval: "20"
-          command: bash scripts/openssh-wait.sh
-        env:
-          BOOT_WAIT: ${{ github.event.inputs.boot_wait }}
-          SHOTS: shots
-          NAME: sshinst
+          # The settings are inline rather than in an env: block. log-stream runs the
+          # string it is given; relying on it to also forward step-level env would be
+          # an assumption about the action's source that I have not read, and the
+          # failure mode would be silent - the script would fall back to its defaults
+          # and the run would look fine while testing the wrong limit.
+          command: BOOT_WAIT=${{ github.event.inputs.boot_wait }} SHOTS=shots NAME=sshinst bash scripts/openssh-wait.sh
 
       - name: wait result
         run: |
