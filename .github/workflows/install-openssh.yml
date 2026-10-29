@@ -406,6 +406,10 @@ jobs:
       #
       # sshpass logs in. If it fails it says why, in words that name the cause.
       - name: log in over ssh
+        # ALWAYS. The banner probe above can time out on a slow-but-working port, and when
+        # it failed this step was skipped - so the one check that would have proved the
+        # login worked never ran. It must not depend on a weaker check succeeding.
+        if: always()
         uses: easydev-org/easyagent-github-ext/actions/log-stream@main
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
