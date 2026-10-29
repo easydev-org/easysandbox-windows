@@ -86,7 +86,43 @@ jobs:
           disk=$(find artifact -type f -size +1G | head -1)
           [ -n "$disk" ] || { echo "no disk in the artifact"; exit 1; }
           # QEMU opens /storage/data.img as raw, so the qcow2 export must be converted.
+          #
+          # AND THE RESULT IS CHECKED, which it never was before. Two runs from this same
+          # artifact produced a desktop in 26s and a black screen for 1186s, and the only
+          # environmental difference was how much free space the runner had reported
+          # (145s vs 68s spent freeing it). A 64 GiB raw image needs 64 GiB of free disk;
+          # if the conversion is cut short the file still exists, still looks like a disk,
+          # QEMU still starts, UEFI still finds Boot0005 - and then nothing paints.
+          echo "--- free space before conversion ---"
+          df -h . | tail -1
+          need=67108864   # 64 GiB in KiB
+          avail=$(df --output=avail -k . | tail -1)
+          echo "  need ${need}K, have ${avail}K"
+          if [ "$avail" -lt "$need" ]; then
+            echo "NOT ENOUGH SPACE for a 64 GiB raw image - refusing to convert"
+            exit 1
+          fi
+
           qemu-img convert -O raw "$disk" storage/data.img
+          chmod a+r storage/data.img
+
+          # Verify the conversion produced a complete raw image. virtual size must be
+          # exactly 64 GiB and the format must be raw; a truncated file reports less.
+          echo "--- converted image ---"
+          qemu-img info storage/data.img
+          size=$(stat -c%s storage/data.img)
+          echo "  file size: $size bytes"
+          if [ "$size" -ne 68719476736 ]; then
+            echo "CONVERSION INCOMPLETE: expected 68719476736 bytes, got $size"
+            exit 1
+          fi
+          # A raw image of the right size can still be all zeroes if the source had no
+          # data - compare allocated clusters against the qcow2 it came from.
+          echo "--- does it carry data? (non-zero sample) ---"
+          for off in 0 512 1048576 17179869184 34359738368 51539607552; do
+            n=$(dd if=storage/data.img bs=1 skip=$off count=4096 2>/dev/null | tr -d '\0' | wc -c)
+            echo "    offset $off: $n non-zero bytes"
+          done
           chmod a+r storage/data.img
 
           state=$(find artifact -name '*.bootstate.tar.gz' | head -1)
