@@ -110,6 +110,13 @@ docker exec "$NAME" sh /tmp/cleanup-nat.sh
 # nat rules - was inferred from 'no banner'. None of them measured whether a SYN from this
 # host reaches the container at all. This does: it opens a connection in the background
 # and reads the container socket table while it is pending.
+# THE ARRIVAL PROBE ANSWERED THE FIRST HALF: a pending connection from this host does
+# not appear in the container socket table at all, so the SYN never reaches the namespace.
+# That rules out every container-side setting for good. What differs between 8006 (which
+# answers) and 2222 (which does not) is therefore entirely on this side of the boundary.
+echo "--- how this host dispatches 2222 vs 8006 ---"
+PORT="$PORT" CIP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$NAME" 2>/dev/null)" bash "$(dirname "$0")/compare-paths.sh"
+
 echo "--- host->container arrival probe ---"
 NAME="$NAME" PORT="$PORT" HOST=127.0.0.1 bash "$(dirname "$0")/probe-arrival.sh"
 
