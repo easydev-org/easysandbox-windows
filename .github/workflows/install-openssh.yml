@@ -252,6 +252,37 @@ jobs:
           docker cp sshinst:/tmp/f1.ppm shots/sshd.ppm >/dev/null 2>&1 || true
           python3 scripts/ppm2png.py shots/sshd.ppm shots/sshd.png >/dev/null 2>&1 || true
 
+      - name: what does qemu forward
+        run: |
+          set -x
+          # The guest says sshd is Running on Port 2222, and the host still sees nothing
+          # on 2222. That leaves the forwarding layer, so read QEMU's own arguments:
+          # netdev hostfwd entries are the only thing that can carry a host port into
+          # the guest.
+          docker exec sshinst sh -c 'ps -ef | grep -oE "hostfwd=[^ ]*" | head -10' 2>&1 | sed 's/^/  /' || true
+          docker exec sshinst sh -c 'ps -ef | grep -oE "netdev user[^ ]*" | head -5' 2>&1 | sed 's/^/  /' || true
+          echo "--- all hostfwd fragments ---"
+          docker exec sshinst sh -c 'ps -ef | grep -o "hostfwd=[^ ,]*" | head -10' 2>&1 | sed 's/^/  /' || true
+          echo "--- docker port ---"
+          docker port sshinst || true
+          echo "--- docker logs, network lines ---"
+          docker logs sshinst 2>&1 | grep -iE "mode|guest:|forward|user-mode|USER_PORTS" | head -10 || true
+
+      - name: test ssh from inside the guest
+        run: |
+          set -x
+          port=${{ github.event.inputs.port }}
+          # If sshd answers itself on 127.0.0.1 the service is fine and the problem is
+          # purely the forward. Test-NetConnection reports True/False without opening
+          # an interactive session.
+          t="Test-NetConnection -ComputerName 127.0.0.1 -Port $port -InformationLevel Quiet"
+          docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock "$t" --enter
+          sleep 25
+          docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/t1.ppm >/dev/null 2>&1 || true
+          docker cp sshinst:/tmp/t1.ppm shots/loopback.ppm >/dev/null 2>&1 || true
+          python3 scripts/ppm2png.py shots/loopback.ppm shots/loopback.png >/dev/null 2>&1 || true
+          ls -la shots/loopback*
+
       - name: confirm sshd inside the guest
         run: |
           set -x
