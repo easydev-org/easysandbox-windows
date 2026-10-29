@@ -96,16 +96,13 @@ echo "--- removing EVERY nat rule an earlier run installed ---"
 # never seeing outside traffic.
 #
 # So delete by LINE NUMBER, walking each chain backwards, matching only the comment.
-docker exec "$NAME" sh -c "
-  for chain in PREROUTING POSTROUTING OUTPUT; do
-    nums=$(iptables -t nat -L $chain --line-numbers -n 2>/dev/null | awk '/QEMU_DNAT/ {print $1}' | sort -rn)
-    for n in $nums; do iptables -t nat -D $chain $n 2>/dev/null || true; done
-  done
-  iptables -t nat -F QEMU_DNAT 2>/dev/null || true
-  iptables -t nat -X QEMU_DNAT 2>/dev/null || true
-  echo '  PREROUTING after cleanup:'
-  iptables -t nat -S PREROUTING 2>/dev/null | head -8
-" 2>&1 | sed 's/^/  /'
+# The cleanup is a FILE COPIED INTO THE CONTAINER and run there, not an inline string.
+# Every previous version nested $chain and $nums through docker exec -> sh -c -> double
+# quotes, so the host expanded them to nothing, set -u aborted the loop with
+# "chain: unbound variable", and the hijacking rules stayed in place while the relay
+# looked perfectly healthy. A file has no quoting layer at all.
+docker cp "$(dirname "$0")/cleanup-nat.sh" "$NAME:/tmp/cleanup-nat.sh"
+docker exec "$NAME" sh /tmp/cleanup-nat.sh
 
 echo "--- container -> guest:$PORT ---"
 docker exec "$NAME" sh -c "
