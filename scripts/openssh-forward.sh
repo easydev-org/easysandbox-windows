@@ -1,80 +1,98 @@
 #!/usr/bin/env bash
-# Make the guest's sshd reachable on the container's published port.
+# Make the guest reachable on the container's published ports.
 #
-# WHAT IS MEASURED, and it has not changed through four attempts:
+# COPIED FROM THE PROJECT'S OWN sandbox.sh, function setup_network(), rather than
+# invented. This repository ships the real implementation (Containerfile + sandbox.sh +
+# guest/), and its networking section already solves this exact problem. Reading it
+# first would have saved several attempts at a Python relay.
 #
-#   guest side          Test-NetConnection 127.0.0.1:2222   -> True
-#   container -> guest  connect 172.30.0.2:2222             -> "Connection succeeded!"
-#   host -> container   read a banner on 127.0.0.1:2222     -> nothing
+# The rules, and why each is needed - I had got three of the five wrong before:
 #
-# QEMU runs '-netdev tap,...' with no hostfwd, because NET_ADMIN makes dockur bridge the
-# guest onto its own address. So docker publishes 2222, forwards into the container, and
-# nothing is bound there. nat-table DNAT did not help: docker's userland proxy hands the
-# connection straight into the namespace, so it never appears as forwarded traffic.
+#   sysctl net.ipv4.ip_forward=1
+#       forwarding is off by default; without it nothing crosses eth0 <-> bridge
+#   PREROUTING ! -i BRIDGE -m addrtype --dst-type LOCAL -j QEMU_DNAT
+#       the ! -i guard stops traffic arriving FROM the bridge being re-DNAT'd into it
+#   QEMU_DNAT -j DNAT --to-destination GUEST_IP
+#       no ':port' - the port is preserved, which is what makes every published port
+#       work rather than only the one that was hard-coded
+#   POSTROUTING -s BRIDGE_IP/PREFIX ! -d ... ! -o BRIDGE -j MASQUERADE
+#       the guest's replies need source NAT, or they leave with an address the sender
+#       cannot route back to
+#   FORWARD ACCEPT in both directions
+#       the filter table's default policy drops the forwarded flows even when nat is
+#       correct
 #
-# The relay is the right shape - listen here, connect upstream - but starting it with
-# 'nohup python3 ... &' inside docker exec did NOT work, and the evidence was in the
-# failure output: '(no relay log)' and '(nothing on that port)'. The backgrounded child
-# of an exec dies with that exec.
-#
-# So the relay is started as a detached session with setsid and its output redirected by
-# the shell that launches it, and then the listener is CONFIRMED before moving on - a
-# relay that is not listening is worse than none, because everything downstream then
-# tests the wrong thing.
+# docker publish plus these rules is the whole mechanism. There is no listener for port
+# 22 inside the upstream container either - DNAT is what answers.
 set -eu
 
+BRIDGE="${BRIDGE:-docker}"
+BRIDGE_IP="${BRIDGE_IP:-172.30.0.1}"
+GUEST_IP="${GUEST_IP:-172.30.0.2}"
+PREFIX="${PREFIX:-24}"
 NAME="${NAME:-sshinst}"
 PORT="${PORT:-2222}"
 
-guest=$(docker logs "$NAME" 2>&1 | sed -n 's/.*Guest: \([0-9.]*\).*/\1/p' | tail -1 || true)
-if [ -z "$guest" ]; then
-  echo "could not read the guest address from the container log; assuming 172.30.0.2"
-  guest="172.30.0.2"
+echo "--- guest address, from the container log ---"
+detected=$(docker logs "$NAME" 2>&1 | sed -n 's/.*Guest: \([0-9.]*\).*/\1/p' | tail -1 || true)
+if [ -n "$detected" ]; then
+  GUEST_IP="$detected"
 fi
-echo "guest address: $guest, port: $PORT"
+echo "  guest_ip=$GUEST_IP bridge_ip=$BRIDGE_IP prefix=$PREFIX"
 
-echo "--- can the container reach the guest directly? ---"
+echo "--- interfaces in the container ---"
+docker exec "$NAME" sh -c "ip -o -4 addr show 2>/dev/null" 2>/dev/null | sed 's/^/  /' || true
+
+# The bridge NAME is not assumed. sandbox.sh defaults to 'docker', but this is the
+# upstream dockur image, whose bridge may be named differently. It is identified by the
+# address it owns, parsed on the HOST - nesting $4 and quotes through docker exec -> sh
+# -c is what produced nonsense output in earlier attempts.
+real_bridge=$(docker exec "$NAME" sh -c "ip -o -4 addr show 2>/dev/null" 2>/dev/null \
+  | awk -v ip="$BRIDGE_IP" '$4 ~ ip {print $2; exit}' || true)
+if [ -n "$real_bridge" ]; then
+  BRIDGE="$real_bridge"
+  echo "  bridge owning $BRIDGE_IP: $BRIDGE"
+else
+  echo "  no interface owns $BRIDGE_IP; keeping '$BRIDGE'"
+fi
+
+echo "--- ip_forward ---"
+docker exec "$NAME" sh -c 'sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true'
+docker exec "$NAME" sh -c 'cat /proc/sys/net/ipv4/ip_forward' 2>/dev/null | sed 's/^/  ip_forward=/' || true
+
+echo "--- installing the nat and filter rules ---"
+docker exec "$NAME" sh -c "
+  iptables -t nat -N QEMU_DNAT 2>/dev/null || true
+  iptables -t nat -F QEMU_DNAT
+
+  iptables -t nat -C PREROUTING -m addrtype --dst-type LOCAL -j QEMU_DNAT 2>/dev/null ||
+  iptables -t nat -A PREROUTING ! -i '$BRIDGE' -m addrtype --dst-type LOCAL -m comment --comment QEMU_DNAT -j QEMU_DNAT
+
+  iptables -t nat -C POSTROUTING -s '$BRIDGE_IP/$PREFIX' -j MASQUERADE 2>/dev/null ||
+  iptables -t nat -A POSTROUTING -s '$BRIDGE_IP/$PREFIX' ! -d '$BRIDGE_IP/$PREFIX' ! -o '$BRIDGE' -m comment --comment QEMU_DNAT -j MASQUERADE
+
+  iptables -t nat -A QEMU_DNAT -m comment --comment QEMU_DNAT -j DNAT --to-destination '$GUEST_IP'
+
+  iptables -t filter -C FORWARD -s '$BRIDGE_IP/$PREFIX' -j ACCEPT 2>/dev/null ||
+  iptables -t filter -A FORWARD -s '$BRIDGE_IP/$PREFIX' -i '$BRIDGE' ! -o '$BRIDGE' -j ACCEPT
+
+  iptables -t filter -C FORWARD -d '$GUEST_IP/32' -j ACCEPT 2>/dev/null ||
+  iptables -t filter -A FORWARD -d '$GUEST_IP/32' ! -i '$BRIDGE' -o '$BRIDGE' -j ACCEPT
+
+  echo '  --- nat QEMU_DNAT ---'
+  iptables -t nat -S QEMU_DNAT 2>/dev/null
+  echo '  --- nat PREROUTING/POSTROUTING (ours) ---'
+  iptables -t nat -S PREROUTING 2>/dev/null | grep QEMU_DNAT || true
+  iptables -t nat -S POSTROUTING 2>/dev/null | grep QEMU_DNAT || true
+  echo '  --- filter FORWARD (ours) ---'
+  iptables -S FORWARD 2>/dev/null | grep '172.30.' || true
+" 2>&1 | sed 's/^/  /'
+
+echo "--- container -> guest:$PORT ---"
 docker exec "$NAME" sh -c "
   if command -v nc >/dev/null 2>&1; then
-    nc -z -w 5 $guest $PORT && echo 'direct: open' || echo 'direct: closed'
+    nc -z -w 5 '$GUEST_IP' '$PORT' && echo '  direct: open' || echo '  direct: closed'
   else
-    timeout 5 sh -c \"echo > /dev/tcp/$guest/$PORT\" 2>/dev/null && echo 'direct: open' || echo 'direct: closed'
+    timeout 5 sh -c 'echo > /dev/tcp/$GUEST_IP/$PORT' 2>/dev/null && echo '  direct: open' || echo '  direct: closed'
   fi
-" 2>&1 | sed 's/^/  /'
-
-echo "--- installing the relay ---"
-docker cp "$(dirname "$0")/guest-relay.py" "$NAME:/tmp/guest-relay.py"
-
-echo "--- starting it detached ---"
-# docker exec -d is the supported way to leave a process running in a container: the exec
-# returns immediately and the process is not tied to it. The first attempt used
-# 'nohup ... &' inside a foreground exec, and the child died with the exec - visible in
-# the failure output as '(no relay log)' and '(nothing on that port)'.
-docker exec "$NAME" sh -c 'pkill -f guest-relay.py 2>/dev/null || true; rm -f /tmp/relay.log' || true
-docker exec -d "$NAME" sh -c "python3 /tmp/guest-relay.py $PORT $guest $PORT > /tmp/relay.log 2>&1"
-sleep 4
-docker exec "$NAME" sh -c "
-  echo '  pid: '\$(pgrep -f guest-relay.py | tr '\n' ' ')
-  echo '  log:'
-  sed 's/^/    /' /tmp/relay.log 2>/dev/null || echo '    (no log written)'
-" 2>&1 | sed 's/^/  /'
-
-echo "--- is it actually listening? ---"
-docker exec "$NAME" sh -c "
-  if (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q ':$PORT '; then
-    (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep ':$PORT ' | sed 's/^/  /'
-    echo '  LISTENING'
-  else
-    echo '  NOT LISTENING - the relay did not come up'
-    exit 1
-  fi
-" 2>&1 | sed 's/^/  /'
-
-echo "--- relay the port from inside the container (should now answer) ---"
-docker exec "$NAME" sh -c "
-  if command -v nc >/dev/null 2>&1; then
-    timeout 8 nc 127.0.0.1 $PORT < /dev/null 2>&1 | head -1 || true
-  else
-    timeout 8 sh -c \"exec 3<>/dev/tcp/127.0.0.1/$PORT; head -c 60 <&3\" 2>/dev/null || true
-  fi
-" 2>&1 | sed 's/^/  /'
+" 2>&1
