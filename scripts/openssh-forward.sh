@@ -82,8 +82,13 @@ docker exec "$NAME" sh -c "
   iptables -t nat -N QEMU_DNAT 2>/dev/null || true
   iptables -t nat -F QEMU_DNAT
 
+  # Remove EVERY QEMU_DNAT jump before inserting, or an older unscoped rule keeps
+  # matching wider than intended. The previous run left:
+  #   -A PREROUTING ! -i docker --dst-type LOCAL -j QEMU_DNAT     <- no port filter
+  # alongside the correct one, so any local port still went to the guest.
   while iptables -t nat -D PREROUTING -m comment --comment QEMU_DNAT -j QEMU_DNAT 2>/dev/null; do :; done
   iptables -t nat -I PREROUTING 1 ! -i '$BRIDGE' -m addrtype --dst-type LOCAL -p tcp --dport '$PORT' -m comment --comment QEMU_DNAT -j QEMU_DNAT
+  echo '  PREROUTING cleaned of earlier QEMU_DNAT jumps, ours inserted at 1' 
 
   iptables -t nat -C POSTROUTING -s '$BRIDGE_IP/$PREFIX' -j MASQUERADE 2>/dev/null ||
   iptables -t nat -A POSTROUTING -s '$BRIDGE_IP/$PREFIX' ! -d '$BRIDGE_IP/$PREFIX' ! -o '$BRIDGE' -m comment --comment QEMU_DNAT -j MASQUERADE

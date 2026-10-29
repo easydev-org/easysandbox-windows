@@ -42,6 +42,24 @@ docker exec "$NAME" sh -c "
   iptables -t nat -S 2>/dev/null | grep 2222 || echo '  (no nat rule)'
 " 2>&1 | sed 's/^/  /'
 
+# THE HOST SIDE OF THE FORWARD.
+# The container rules are now exactly sandbox.sh's, printed in order and verified:
+# PREROUTING position 1 for tcp/2222 with the ! -i guard, QEMU_DNAT with the right
+# DNAT, MASQUERADE, both FORWARD ACCEPTs - and the container reaches 172.30.0.2:2222.
+# If the banner still fails, the drop is BEFORE the container: docker publishes the port
+# with a host-side rule pointing at the container address. Printing that side here means
+# the next failure is observed rather than inferred.
+echo "--- host: docker rules for $PORT ---"
+(iptables -t nat -S DOCKER 2>/dev/null || sudo iptables -t nat -S DOCKER 2>/dev/null || echo "  (cannot read host nat)") | grep "$PORT" | sed "s/^/  /" || echo "  (none mention $PORT)"
+echo "--- host: listeners on $PORT ---"
+(ss -ltnp 2>/dev/null || sudo ss -ltnp 2>/dev/null) | grep ":$PORT " | sed "s/^/  /" || echo "  (none)"
+echo "--- host -> container address ---"
+if [ -n "$CID" ]; then
+  hd=$(timeout 5 bash -c "exec 3<>/dev/tcp/$CID/$PORT; head -c 60 <&3" 2>/dev/null | tr -d "
+" || true)
+  echo "  host -> $CID:$PORT  ->  ${hd:-nothing}"
+fi
+
 echo "--- polling $HOST:$PORT for a banner ---"
 while [ "$SECONDS" -lt "$DEADLINE" ]; do
   banner=$(banner_at "$HOST" "$PORT")
