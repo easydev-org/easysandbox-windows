@@ -47,6 +47,12 @@ PUNCT = {
     ")": "shift-0",
     "[": "bracket_left",
     "]": "bracket_right",
+    # Curly braces were missing, and a PowerShell command using a script block
+    # {$_....} therefore died on the first brace with
+    #   guest-type: cannot map '{' to a key name
+    # after typing nothing at all. Same physical keys, shifted.
+    "{": "shift-bracket_left",
+    "}": "shift-bracket_right",
     "|": "shift-backslash",
     "$": "shift-4",
     "&": "shift-7",
