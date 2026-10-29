@@ -327,15 +327,36 @@ stage_wait() {
       # they have to survive the run.
       SHOT_DIR="${SHOT_DIR:-$PWD/screenshots}"
       mkdir -p "$SHOT_DIR"
-      while (( waited < 4200 )); do
+      while (( waited < 5400 )); do
         if stage_screenshot >/dev/null 2>&1; then
           latest=$(ls -1t "$SHOT_DIR"/*.ppm 2>/dev/null | head -1)
           if [ -n "$latest" ]; then
             stage=$(python3 "$(dirname "$0")/screen-read.py" "$latest" 2>>"$SHOT_DIR/ocr.log" || echo unknown)
             log "screen at ${waited}s: ${stage}"
+            # A DESKTOP IS NOT PROOF OF COMPLETION.
+            #
+            # That mistake cost a whole bake. At 360s a desktop appeared - docker
+            # user, taskbar, Start menu, all confirmed in the frames - the guest was
+            # stopped at once, and the exported image booted to "Installing Windows
+            # 11 - 65% complete". Windows 11 shows a desktop during its own
+            # multi-stage install (profile preparation, first-logon tasks) and then
+            # carries on installing.
+            #
+            # Setup never returns to an install stage once it is genuinely finished,
+            # so the rule is persistence, not a single sighting: the desktop must hold
+            # for six consecutive checks (~6 minutes).
             if [ "$stage" = "desktop" ]; then
-              log "desktop is up after ${waited}s - installation finished"
-              break
+              desktop_run=$(( ${desktop_run:-0} + 1 ))
+              if (( desktop_run >= 6 )); then
+                log "desktop held for ${desktop_run} consecutive checks - installation finished"
+                break
+              fi
+              log "desktop seen (${desktop_run}/6); waiting to be sure Setup is done"
+            else
+              if (( ${desktop_run:-0} > 0 )); then
+                log "left the desktop for '${stage}' - Setup is still working; resetting"
+              fi
+              desktop_run=0
             fi
             # 'language' means the answer file was not honoured; nothing will
             # change by waiting, so say so rather than burning the budget.
