@@ -414,7 +414,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           name: openssh-login
-          interval: 
+          interval: "15"
           command: PORT=${{ github.event.inputs.port }} bash scripts/ssh-login-test.sh
 
       - name: keep the final frame
