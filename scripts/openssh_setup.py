@@ -158,12 +158,35 @@ def stage_disk(args):
 
 
 def stage_boot(args):
-    """Start the container and wait for a desktop, reporting what the screen shows."""
+    """Start the container on the prepared disk and wait for a desktop.
+
+    DISK_SIZE MUST MATCH THE DISK. This was hard-coded to 64G, the size bake-golden
+    produces, and a disk published from a 128 GiB bake then booted to a blank screen that
+    never reached a desktop for over 460 seconds - dockur sizes the container view from
+    DISK_SIZE, and telling it 64G while data.img holds 128 GiB is a mismatch it does not
+    report, it just does not boot.
+
+    So the size comes from the disk itself. --disk-size overrides when a caller knows
+    better, and the value actually used is printed, because a wrong guess here costs the
+    whole boot.
+    """
+    size = args.disk_size
+    if not size:
+        qcow = os.path.join("storage", "data.img")
+        if os.path.exists(qcow):
+            vs = virtual_size(qcow)
+            if vs:
+                # Whole GiB, rounded up: dockur accepts the size as a docker -e value.
+                size = "%dG" % ((vs + (1 << 30) - 1) // (1 << 30))
+        size = size or "64G"
+    print("  DISK_SIZE=%s (from the disk)" % size, flush=True)
+
     xsh.run(["docker", "rm", "-f", args.container], echo=False)
     xsh.run([
         "docker", "run", "-d", "--name", args.container,
         "--device=/dev/kvm", "--device=/dev/net/tun", "--cap-add", "NET_ADMIN",
-        "-e", "VERSION=11", "-e", "DISK_SIZE=64G", "-e", "RAM_SIZE=8G", "-e", "CPU_CORES=4",
+        "-e", "VERSION=11", "-e", "DISK_SIZE=%s" % size,
+        "-e", "RAM_SIZE=8G", "-e", "CPU_CORES=4",
         "-p", "%d:%d" % (args.port, args.port),
         "-p", "8006:8006", "--stop-timeout", "180",
         "-v", "%s/storage:/storage" % os.getcwd(),
@@ -194,9 +217,6 @@ def stage_boot(args):
         last = stage
         time.sleep(15)
     xsh.need(False, "no desktop within %ds (last stage %r)" % (args.wait, last))
-
-
-
 
 
 def stage_install(args):
@@ -390,6 +410,8 @@ def main(argv=None):
     ap.add_argument("--password", default="admin")
     ap.add_argument("--wait", type=int, default=1800, help="boot: seconds to wait for desktop")
     ap.add_argument("--attempts", type=int, default=6)
+    ap.add_argument("--disk-size", default="",
+                    help="boot: DISK_SIZE for docker; default read from the disk")
     ap.add_argument("--shots", default="shots")
     ap.add_argument("--out-name", default="windows.qcow2",
                     help="export/publish: filename of the qcow2 in out/")
