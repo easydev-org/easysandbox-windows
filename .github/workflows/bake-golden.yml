@@ -88,7 +88,7 @@ jobs:
           sudo apt-get clean || true
           df -h / "" || true
       - name: bake prepare
-        run: sudo -E bash scripts/bake-golden.sh prepare
+        run: sudo -E python3 scripts/bake_golden.py prepare
       # Streamed too, not just the long wait. This step is where a bad docker run
       # dies, and it died there twice with no readable log: the failure was a syntax
       # error in the continuation, invisible until the arguments it lost were
@@ -99,7 +99,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           name: bake-start
           interval: "10"
-          command: sudo -E bash scripts/bake-golden.sh start
+          command: sudo -E python3 scripts/bake_golden.py start
       # Streamed into a check run, because this step is up to 90 minutes long and
       # GitHub publishes no log for a running job - /actions/jobs/{id}/logs is a
       # redirect to a blob that only appears when the job ends, and answers
@@ -112,7 +112,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           name: bake-wait
           interval: "20"
-          command: sudo -E bash scripts/bake-golden.sh wait
+          command: sudo -E python3 scripts/bake_golden.py wait
       # Capture what the guest is showing before it is stopped, the same way the
       # macOS bake does. Disk size cannot distinguish "still installing" from
       # "finished" or "stuck on a prompt"; a framebuffer dump can.
@@ -120,7 +120,7 @@ jobs:
         if: always()
         run: |
           mkdir -p screenshots
-          sudo SHOT_DIR="$PWD/screenshots" -E bash scripts/bake-golden.sh shot
+          sudo -E python3 scripts/bake_golden.py shot
           sudo chown -R "$(id -u):$(id -g)" screenshots || true
           ls -la screenshots || true
       # Runs even when wait failed. A disk that reached a desktop but whose ssh did
@@ -129,7 +129,7 @@ jobs:
       # failed after the install had already succeeded.
       - name: bake extract disk
         if: always()
-        run: sudo -E bash scripts/bake-golden.sh extract
+        run: sudo -E python3 scripts/bake_golden.py extract
       - name: debug container
         if: failure()
         run: |
