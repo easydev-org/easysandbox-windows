@@ -102,8 +102,11 @@ jobs:
             --container verifydisk --port ${{ github.event.inputs.port }}
             --wait ${{ github.event.inputs.boot_wait }}
 
+      # ONLY WHEN THE DISK HAS sshd. A plain baked disk has nothing listening, so forwarding
+      # it is meaningless - and it spent a step failing on 'no eth0 address', which reads
+      # like a networking fault rather than 'this disk has no sshd by design'.
       - name: expose the port
-        if: always()
+        if: always() && github.event.inputs.expect_login == 'yes'
         uses: easydev-org/easyagent-github-ext/actions/log-stream@main
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
