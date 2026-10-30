@@ -41,7 +41,7 @@ def stage_place(args):
     the disk, and not worth a second registry round trip.
     """
     os.makedirs("storage", exist_ok=True)
-    repo = args.pull_repo or "golden-disk-windows"
+    repo = args.pull_repo or "easysandbox-windows-golden"
     tag = args.pull_tag or "base"
     print("--- pulling ghcr.io/easydev-org/%s:%s ---" % (repo, tag), flush=True)
 
@@ -334,7 +334,7 @@ def stage_publish(args):
     xsh.need(os.path.exists(path), "no %s to publish - run export first" % path)
     print("  %s: %.1f MiB" % (path, os.path.getsize(path) / 2 ** 20), flush=True)
 
-    target = args.publish_repo or "ghcr.io/easydev-org/golden-disk-windows"
+    target = args.publish_repo or "ghcr.io/easydev-org/easysandbox-windows-golden"
     base_tag = args.publish_tag or "base"
 
     # SOURCE_DATE_EPOCH lets a caller pin the name; otherwise the clock decides. UTC with
@@ -415,9 +415,9 @@ def main(argv=None):
     ap.add_argument("--shots", default="shots")
     ap.add_argument("--out-name", default="windows.qcow2",
                     help="export/publish: filename of the qcow2 in out/")
-    ap.add_argument("--publish-repo", default="ghcr.io/easydev-org/golden-disk-windows")
+    ap.add_argument("--publish-repo", default="ghcr.io/easydev-org/easysandbox-windows-golden")
     ap.add_argument("--publish-tag", default="base")
-    ap.add_argument("--pull-repo", default="golden-disk-windows")
+    ap.add_argument("--pull-repo", default="easysandbox-windows-golden")
     ap.add_argument("--pull-tag", default="base")
     ap.add_argument("--stamp", default="",
                     help="publish: version stamp; defaults to UTC now")

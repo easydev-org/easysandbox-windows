@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       pull_tag:
-        description: "ghcr tag under golden-disk-windows (base, openssh, dev)"
+        description: "ghcr tag under easysandbox-windows-golden (base, openssh, dev)"
         required: false
         default: "ssh-latest"
       bootstate_run:
@@ -45,6 +45,10 @@ permissions:
   contents: read
   actions: read
   checks: write
+  # packages: write is required to push the golden disk to ghcr. Without it the registry
+  # answers 403 Forbidden partway into the layer upload - measured on the first publish
+  # attempt, which failed on layer 1/12 after the disk itself had been built successfully.
+  packages: write
 
 jobs:
   verify:
@@ -84,7 +88,7 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >-
           python3 scripts/openssh_setup.py place
-          --pull-repo golden-disk-windows
+          --pull-repo easysandbox-windows-golden
           --pull-tag ${{ github.event.inputs.pull_tag }}
 
       - name: boot and wait for the desktop

@@ -53,6 +53,10 @@ permissions:
   # action answers 'cannot create a check run (403)' and carries on silently, which is
   # exactly how a long step once went unwatched.
   checks: write
+  # packages: write is required to push the golden disk to ghcr. Without it the registry
+  # answers 403 Forbidden partway into the layer upload - measured on the first publish
+  # attempt, which failed on layer 1/12 after the disk itself had been built successfully.
+  packages: write
 
 jobs:
   install:
@@ -159,7 +163,7 @@ jobs:
         run: >-
           python3 scripts/openssh_setup.py publish
           --out-name windows-openssh.qcow2
-          --publish-repo ghcr.io/easydev-org/golden-disk-windows
+          --publish-repo ghcr.io/easydev-org/easysandbox-windows-golden
           --publish-tag ssh
 
       # The BOOTSTATE still goes as an artifact: it is a few hundred KB, it is useless

@@ -38,7 +38,7 @@ OWNER = "easydev-org"
 USER = "x-access-token"
 
 PLAN = {
-    "windows": ("golden-disk-windows", "base"),
+    "windows": ("easysandbox-windows-golden", "base"),
     "macos": ("golden-disk-macos", "base"),
 }
 
@@ -67,7 +67,7 @@ def get(url, tok, accept=None):
 def main():
     # Two forms, because two callers exist:
     #   ghcr_pull_disk.py windows out.qcow2                  a name from PLAN
-    #   ghcr_pull_disk.py golden-disk-windows dev out.qcow2  an explicit repo and tag
+    #   ghcr_pull_disk.py easysandbox-windows-golden dev out.qcow2  an explicit repo and tag
     #
     # The second form is what the pipeline stages use: they publish under several tags of one
     # repository (base, openssh, dev), and a PLAN entry per tag would be a list to keep in step

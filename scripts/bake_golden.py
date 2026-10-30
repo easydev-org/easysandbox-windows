@@ -549,7 +549,7 @@ def main(argv=None):
     ap.add_argument("--wait", type=int, default=int(os.environ.get("WAIT", "7200")))
     ap.add_argument("--shots", default=os.environ.get("SHOTS", "screenshots"))
     ap.add_argument("--disk-path", default=os.environ.get("DISK_PATH", ""))
-    ap.add_argument("--publish-repo", default=os.environ.get("PUBLISH_REPO", "ghcr.io/easydev-org/golden-disk-windows"))
+    ap.add_argument("--publish-repo", default=os.environ.get("PUBLISH_REPO", "ghcr.io/easydev-org/easysandbox-windows-golden"))
     ap.add_argument("--publish-tag", default=os.environ.get("PUBLISH_TAG", "base"))
     args = ap.parse_args(argv)
 
