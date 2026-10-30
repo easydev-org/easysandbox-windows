@@ -41,10 +41,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # accepted by the switches passed TO the override string instead, which is what the installer
 # itself understands.
 PACKAGES = [
+    # No --override. winget rejected the combination and printed help (exit 2). The
+    # workload is passed the way winget documents for this package instead.
     ("Microsoft.VisualStudio.2022.BuildTools",
-     "--quiet --wait --norestart --nocache --accept-license "
-     "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended",
-     "MSVC, the Windows SDK and CMake; --quiet alone installs an empty shell"),
+     ["--add", "Microsoft.VisualStudio.Workload.VCTools", "--includeRecommended"],
+     "MSVC, the Windows SDK and CMake; a bare install has no cl.exe"),
     ("Microsoft.WindowsSDK.10.0.26100", None, "the SDK on its own"),
     ("Microsoft.DotNet.SDK.10", None, "the .NET SDK, which VCTools does not include"),
 ]
@@ -89,6 +90,20 @@ def parse_cl(text):
 
 
 def stage_check_tools(port, user, password):
+    # CAN THE GUEST REACH THE INTERNET AT ALL? winget installs by downloading from
+    # Microsoft, and the guest sits behind QEMU user-mode NAT. ssh working proves the guest
+    # is reachable from here; it says nothing about the guest reaching out. Without this the
+    # failure surfaces three times as
+    #     Failed in attempting to update the source: winget      exit 255
+    # which reads like a winget problem rather than a network one.
+    print("--- can the guest reach the internet ---", flush=True)
+    r = ssh_run(port, user, password, 'curl -s -o NUL -w "%{http_code}" --max-time 20 https://cdn.winget.microsoft.com/cache', timeout=120)
+    code = ((r.out or "") + (r.err or "")).strip().splitlines()
+    print("  https://cdn.winget.microsoft.com  -> %s" % (code[-1][:60] if code else "(no output)"), flush=True)
+    r = ssh_run(port, user, password, "nslookup cdn.winget.microsoft.com", timeout=120)
+    for line in ((r.out or "") + (r.err or "")).strip().splitlines()[-4:]:
+        print("  dns: " + line[:90], flush=True)
+
     print("--- winget over ssh, and what is installed ---", flush=True)
     r = ssh_run(port, user, password, "winget --version")
     xsh.need(r.ok, "winget is not reachable over ssh: %s" % (r.err or r.out))
@@ -109,20 +124,12 @@ def stage_install(port, user, password):
             continue
         print("=== %s ===" % pid, flush=True)
         print("  %s" % why, flush=True)
-        if extra:
-            # --override replaces winget's own switch set, so the accept flags that winget
-            # would add must be inside the string, not alongside it.
-            cmd = " ".join(
-                ["winget", "install", "--id", pid, "--exact", "--source", "winget",
-                 "--accept-source-agreements", "--disable-interactivity",
-                 "--override", extra]
-            )
-        else:
-            cmd = " ".join(
-                ["winget", "install", "--id", pid, "--exact", "--source", "winget",
+        parts = ["winget", "install", "--id", pid, "--exact", "--source", "winget",
                  "--accept-source-agreements", "--accept-package-agreements",
                  "--disable-interactivity"]
-            )
+        if extra:
+            parts += extra
+        cmd = " ".join(parts)
         print("  running: %s" % cmd, flush=True)
         # BuildTools with a workload is slow; ten minutes is ordinary on a fresh machine.
         r = ssh_run(port, user, password, cmd, timeout=3600)
