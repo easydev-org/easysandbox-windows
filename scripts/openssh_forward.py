@@ -164,9 +164,17 @@ def main(argv=None):
     print("  guest: %s" % guest_ip, flush=True)
 
     print("--- container interfaces ---", flush=True)
-    addrs = parse_ifaddrs(
-        xsh.run(["docker", "exec", name, "ip", "-o", "-4", "addr", "show"], echo=False).out
-    )
+    raw = xsh.run(["docker", "exec", name, "ip", "-o", "-4", "addr", "show"], echo=False)
+    if not raw.ok or not (raw.out or "").strip():
+        # SAY SO. The parser returning {} looked exactly like a container with no eth0, and
+        # the step then failed on 'no eth0 address' - a networking conclusion drawn from an
+        # empty command result. Print what happened instead.
+        print("  ip -o -4 addr show failed or returned nothing:", flush=True)
+        print("    exit=%d stdout=%r stderr=%r" % (raw.code, (raw.out or "")[:200], (raw.err or "")[:200]), flush=True)
+        fallback = xsh.run(["docker", "exec", name, "ip", "addr"], echo=False)
+        for line in (fallback.out or fallback.err or "").splitlines()[:20]:
+            print("    " + line[:120], flush=True)
+    addrs = parse_ifaddrs(raw.out)
     for iface, addr in addrs.items():
         print("  %-8s %s" % (iface, addr), flush=True)
     bridge = bridge_for(addrs, args.bridge_ip) or "docker"
