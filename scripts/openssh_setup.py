@@ -56,15 +56,20 @@ def stage_place(args):
     print("  pulled: %.1f MiB" % (os.path.getsize(local) / 2 ** 20), flush=True)
 
     # From here it is identical to the artifact path: convert to raw and check it.
+    # The virtual size is read from the SOURCE, before the convert and before unlink -
+    # afterwards the qcow2 is gone and the only thing left to compare against is the raw
+    # file itself, which would make the check compare a file with itself and pass for no
+    # reason.
+    expect = virtual_size(local)
     free_kb = int(xsh.run(["df", "--output=avail", "-k", "."], echo=False).out.split()[-1])
-    xsh.need(free_kb > 64 * 1024 * 1024, "not enough free space for a 64 GiB raw image")
+    xsh.need(free_kb > 64 * 1024 * 1024, "not enough free space for the raw image")
     xsh.run(["qemu-img", "convert", "-O", "raw", local, "storage/data.img"], check=True)
     os.unlink(local)
     size = os.path.getsize("storage/data.img")
-    expect = virtual_size(disk) or size
-    print("  converted: %d bytes (source virtual size %d)" % (size, expect), flush=True)
-    xsh.need(size == expect,
-             "conversion incomplete: expected %d bytes, got %d" % (expect, size))
+    print("  converted: %d bytes (source virtual size %s)" % (size, expect), flush=True)
+    if expect:
+        xsh.need(size == expect,
+                 "conversion incomplete: expected %d bytes, got %d" % (expect, size))
     nonzero = 0
     with open("storage/data.img", "rb") as f:
         for off in (0, 512, 1 << 20, size // 4, size // 2, size * 3 // 4):
@@ -119,10 +124,11 @@ def stage_disk(args):
     xsh.run(["qemu-img", "convert", "-O", "raw", disk, "storage/data.img"], check=True)
 
     size = os.path.getsize("storage/data.img")
-    expect = virtual_size(disk) or size
-    print("  converted: %d bytes (source virtual size %d)" % (size, expect), flush=True)
-    xsh.need(size == expect,
-             "conversion incomplete: expected %d bytes, got %d" % (expect, size))
+    expect = virtual_size(disk)
+    print("  converted: %d bytes (source virtual size %s)" % (size, expect), flush=True)
+    if expect:
+        xsh.need(size == expect,
+                 "conversion incomplete: expected %d bytes, got %d" % (expect, size))
 
     # Right size but all zeroes is still possible; sample a few offsets.
     nonzero = 0
