@@ -318,7 +318,38 @@ def stage_export(args):
     is which is what keeps the artifacts from being confused later.
     """
     out_name = args.out_name or "windows.qcow2"
-    xsh.run(["docker", "stop", "-t", "180", args.container], echo=True)
+
+    # SHUT WINDOWS DOWN PROPERLY, and wait for it.
+    #
+    # docker stop sends ACPI, which Windows honours - but if the guest is busy it can take
+    # longer than the timeout, and docker then kills QEMU mid-write. The disk that comes out
+    # is crash-consistent at best: it boots, then stalls on a black screen, which is exactly
+    # what a 64G disk with sshd did for 1400 seconds on the next stage.
+    #
+    # So the guest is asked to shut down over SSH first when sshd is there - a controlled
+    # shutdown that flushes - and docker stop is only the fallback. Either way the exit is
+    # checked, and the container must be gone before the disk is copied.
+    print("  stopping the guest", flush=True)
+    # A controlled shutdown where sshd exists: 'shutdown /s' flushes the filesystem, which
+    # is what makes the exported disk clean. If ssh is not there - the bake stage has no
+    # sshd - this fails quietly and docker stop does the ACPI shutdown instead.
+    r = xsh.run([
+        "sshpass", "-p", args.password, "ssh",
+        "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "ConnectTimeout=15", "-o", "PreferredAuthentications=password",
+        "-o", "PubkeyAuthentication=no", "-p", str(args.port),
+        "%s@127.0.0.1" % args.user, "shutdown /s /t 0",
+    ], echo=False, timeout=60)
+    print("  shutdown over ssh: exit %d" % r.code, flush=True)
+    stop = xsh.run(["docker", "stop", "-t", "300", args.container], echo=False)
+    print("  docker stop exit %d" % stop.code, flush=True)
+    state = xsh.run(["docker", "inspect", "-f", "{{.State.Status}}", args.container],
+                    echo=False)
+    status = (state.out or "").strip()
+    print("  container state: %s" % (status or "?/(gone)"), flush=True)
+    xsh.need(status in ("exited", ""), 
+             "container is %r after stop - the disk would be copied mid-write" % status)
+
     os.makedirs("out", exist_ok=True)
     xsh.run(["docker", "cp", "%s:/storage/data.img" % args.container, "out/data.img"], check=True)
     xsh.run(["qemu-img", "convert", "-O", "qcow2", "out/data.img", "out/%s" % out_name],
