@@ -85,7 +85,16 @@ def stage_place(args):
         xsh.run(["tar", "xzf", state, "-C", "storage"], check=True)
         print("  restored bootstate: %s" % state, flush=True)
     else:
-        print("  WARNING: no bootstate archive in the workspace", flush=True)
+        # NOT A WARNING. windows.vars carries the UEFI boot entry (Boot0005 "Windows Boot
+        # Manager"), and without it the firmware falls back to the generic hard-disk entry
+        # Boot0002, fails to boot, and dockur gives up with
+        #     ERROR: Timeout while waiting for QEMU to boot the machine
+        # A disk that cannot boot is not a disk, so this stops here instead of continuing to
+        # a boot that will sit at an unreadable screen for the whole timeout.
+        xsh.need(False,
+                 "no bootstate archive: windows.vars holds the UEFI boot entry and the disk "
+                 "will not start without it. Pass the run id that published the disk via "
+                 "bootstate_run, or put the archive in artifact/.")
 
     open("storage/windows.boot", "w").close()
     print("  completion marker: storage/windows.boot", flush=True)
