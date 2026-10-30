@@ -262,6 +262,23 @@ def stage_wait(cfg):
         log("NOTE: no desktop within %ds (last stage %r); keeping the disk anyway"
             % (cfg.wait_screen, stage))
 
+    # TAKE THE FRAME BEFORE SHUTTING DOWN. The workflow runs 'shot' as its own step after
+    # this one, and by then the container is stopped - docker exec cannot exec into a
+    # stopped container, so that step failed in 0s on the first Python bake. The screenshot
+    # is evidence of what the guest looked like when the verdict was reached, so it belongs
+    # here, before the guest goes away.
+    try:
+        frame = guest.Guest(cfg.name, cfg.shots).screenshot("screen")
+        if frame:
+            log("captured %s" % frame)
+        png = os.path.join(cfg.shots, "screen.png")
+        xsh.run([sys.executable,
+                 os.path.join(os.path.dirname(os.path.abspath(__file__)), "ppm2png.py"),
+                 frame, png], echo=False)
+        log("converted to %s" % png)
+    except Exception as exc:
+        log("could not capture a final frame: %s" % exc)
+
     log("stopping the guest")
     # docker stop sends ACPI shutdown; dockur's finish() then runs markWindowsBooted and
     # writes the marker. Windows takes a while to shut down, hence the long timeout.
