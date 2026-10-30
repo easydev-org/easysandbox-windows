@@ -41,6 +41,19 @@ def put(url, data, tok, ctype):
         return r.status, r.read()
 
 
+def get(url, tok, accept=None):
+    """Read a manifest back. The push script had only put(), and the read-back check
+    called get() - which existed in the sibling pull script, not here. Writing the check
+    without the function it needed is how it failed after the upload had already
+    succeeded."""
+    h = {"Authorization": "Bearer " + tok}
+    if accept:
+        h["Accept"] = accept
+    # Returns the open response, not its body: callers pass it straight to json.load,
+    # the same contract as get() in ghcr_pull_disk.py.
+    return urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=120)
+
+
 def main():
     # ghcr_push_disk.py <disk.qcow2> <ghcr.io/owner/repo> <tag> [more-tags...]
     #
