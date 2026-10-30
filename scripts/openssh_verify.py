@@ -129,7 +129,7 @@ def stage_login(host, port, user, password, timeout):
     return parse_login(r.out, r.err, user)
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=2222)
@@ -139,7 +139,7 @@ def main():
     ap.add_argument("--wait", type=int, default=30, help="per-read timeout, seconds")
     ap.add_argument("--selftest", action="store_true",
                     help="check the parsers against strings seen in real logs")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     if args.selftest:
         sys.exit(selftest())

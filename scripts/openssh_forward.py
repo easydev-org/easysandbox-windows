@@ -143,13 +143,13 @@ iptables -t nat -S PREROUTING 2>/dev/null | head -8
 """
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--container", default="sshinst")
     ap.add_argument("--port", type=int, default=2222)
     ap.add_argument("--bridge-ip", default="172.30.0.1")
     ap.add_argument("--selftest", action="store_true")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     if args.selftest:
         return selftest()

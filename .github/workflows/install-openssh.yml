@@ -1,25 +1,31 @@
 name: install-openssh
 
-# Add OpenSSH Server to a finished golden disk, by typing into the guest.
+# Add OpenSSH Server to a finished golden disk, then prove it works.
 #
-# WHY WINGET AND NOT THE WINDOWS CAPABILITY.
+# WHY THIS IS ONE PYTHON DRIVER AND NOT TWENTY SHELL STEPS.
 #
-# The obvious route is `Add-WindowsCapability -Name OpenSSH.Server~~~~0.0.1.0`, and an
-# earlier version of this pipeline did exactly that. It has two problems here: the
-# capability payload is fetched from Windows Update, which makes it dependent on the
-# guest reaching Microsoft through QEMU's user-mode network, and it installs Microsoft's
-# older inbox build. The instruction for this step is winget, which pulls the current
-# PowerShell/Win32-OpenSSH release from GitHub - the same one upstream maintains.
+# The previous version was twenty `run:` blocks, and six separate failures came out of
+# their quoting - a bracket class eaten by an outer shell, a backslash lost through
+# docker exec -> sh -c, a $var expanded on the host instead of in the container, a YAML
+# value that vanished, a backslash-dollar written as a literal, and glob rules assumed to
+# be python rules. None of those were logic errors; each cost a twenty-minute run.
 #
-# HOW THE COMMANDS GET IN.
+# Now every stage is a subcommand of scripts/openssh_setup.py, which calls docker through
+# argv lists (shell=False), so no argument is ever reinterpreted. The parsing that decides
+# pass or fail lives in functions, and `selftest` replays strings from the real logs
+# without a container - so the checker can be checked before it is trusted.
 #
-# There is no agent, no shared folder and no network service in a freshly installed
-# guest, so the only channel is the console: QEMU's HMP `sendkey`, the same mechanism
-# the macOS driver uses to click its Setup Assistant. guest-type.py maps text to key
-# names and types it.
+# What the stages do:
 #
-# Win+R opens the Run box, which accepts typing immediately - unlike the Start menu
-# search, which needs the shell to have finished loading its index.
+#   disk     convert the artifact to raw and verify it (a truncated conversion boots and
+#            then never paints; that cost two runs)
+#   boot     start the container, wait for a desktop by watching the screen
+#   install  winget install Microsoft.OpenSSH.Preview - the id in microsoft/winget-pkgs -
+#            then configure sshd and the firewall
+#   forward  listen on the port docker forwards to, relaying to the guest
+#   verify   connect, banner, login - each reported, because 'no banner' used to mean all
+#            three and that ambiguity wasted many rounds
+#   export   stop the guest and take the disk out with its boot state
 on:
   workflow_dispatch:
     inputs:
@@ -28,48 +34,46 @@ on:
         required: true
         default: "40746509253"
       boot_wait:
-        description: "Seconds to let Windows reach the desktop before typing"
+        description: "Seconds to wait for the guest's desktop"
         required: false
         default: "1800"
       port:
-        description: "sshd port inside the guest (also the forwarded host port)"
+        description: "sshd port in the guest, and the published host port"
         required: false
         default: "2222"
       export_disk:
-        description: "Export the disk after the work, as a new golden artifact"
+        description: "Export the finished disk as a new artifact"
         required: false
         default: "yes"
 
 permissions:
   contents: read
   actions: read
-  # checks: write is what lets log-stream create the check run it streams into. Its
-  # absence is silent: the action answers
-  #   cannot create a check run (403): Resource not accessible by integration
-  # and carries on without streaming, so the only visible symptom is a check run that
-  # never appears - which is exactly what happened here. The same note already exists
-  # in bake-golden.yml; this workflow was missing the line.
+  # checks: write lets log-stream create the check run it streams into. Without it the
+  # action answers 'cannot create a check run (403)' and carries on silently, which is
+  # exactly how a long step once went unwatched.
   checks: write
 
 jobs:
   install:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
       - name: tooling
         run: |
           sudo apt-get update -qq
-          # sshpass turns 'a banner appeared' into 'a login worked'. A banner only proves
-          # something spoke SSH on the port; sshpass proves the account, the password
-          # auth setting and the shell all work, and prints the failure reason if not.
+          # sshpass turns "a banner appeared" into "a login worked". qemu-utils for the disk
+          # conversion, tesseract for reading the guest's screen.
           sudo apt-get install -y -qq qemu-utils tesseract-ocr sshpass
-          sshpass -V | head -1
+
+      # THE CHECKER IS CHECKED FIRST, in two seconds, before anything costs twenty minutes.
+      - name: parser selftest
+        run: python3 scripts/openssh_setup.py selftest
 
       - name: free disk space
         run: |
-          set -x
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
                       /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" /opt/hostedtoolcache/CodeQL || true
           sudo docker image prune -af || true
@@ -84,303 +88,29 @@ jobs:
           run-id: ${{ github.event.inputs.artifact_run }}
 
       - name: place the disk
-        run: |
-          set -x
-          mkdir -p storage
-          disk=$(find artifact -type f -size +1G | head -1)
-          [ -n "$disk" ] || { echo "no disk in the artifact"; exit 1; }
-          # QEMU opens /storage/data.img as raw, so the qcow2 export must be converted.
-          #
-          # AND THE RESULT IS CHECKED, which it never was before. Two runs from this same
-          # artifact produced a desktop in 26s and a black screen for 1186s, and the only
-          # environmental difference was how much free space the runner had reported
-          # (145s vs 68s spent freeing it). A 64 GiB raw image needs 64 GiB of free disk;
-          # if the conversion is cut short the file still exists, still looks like a disk,
-          # QEMU still starts, UEFI still finds Boot0005 - and then nothing paints.
-          echo "--- free space before conversion ---"
-          df -h . | tail -1
-          need=67108864   # 64 GiB in KiB
-          avail=$(df --output=avail -k . | tail -1)
-          echo "  need ${need}K, have ${avail}K"
-          if [ "$avail" -lt "$need" ]; then
-            echo "NOT ENOUGH SPACE for a 64 GiB raw image - refusing to convert"
-            exit 1
-          fi
+        run: python3 scripts/openssh_setup.py disk
 
-          qemu-img convert -O raw "$disk" storage/data.img
-          chmod a+r storage/data.img
-
-          # Verify the conversion produced a complete raw image. virtual size must be
-          # exactly 64 GiB and the format must be raw; a truncated file reports less.
-          echo "--- converted image ---"
-          qemu-img info storage/data.img
-          size=$(stat -c%s storage/data.img)
-          echo "  file size: $size bytes"
-          if [ "$size" -ne 68719476736 ]; then
-            echo "CONVERSION INCOMPLETE: expected 68719476736 bytes, got $size"
-            exit 1
-          fi
-          # A raw image of the right size can still be all zeroes if the source had no
-          # data - compare allocated clusters against the qcow2 it came from.
-          echo "--- does it carry data? (non-zero sample) ---"
-          for off in 0 512 1048576 17179869184 34359738368 51539607552; do
-            n=$(dd if=storage/data.img bs=1 skip=$off count=4096 2>/dev/null | tr -d '\0' | wc -c)
-            echo "    offset $off: $n non-zero bytes"
-          done
-          chmod a+r storage/data.img
-
-          state=$(find artifact -name '*.bootstate.tar.gz' | head -1)
-          if [ -n "$state" ]; then
-            tar xzf "$state" -C storage
-            echo "restored boot state: $(tar tzf "$state" | tr '\n' ' ')"
-          fi
-
-          # The completion marker tells dockur the install is finished, so it boots the
-          # disk instead of falling into its install path - which would also force
-          # Secure Boot on and the firmware would then refuse this disk's boot entry.
-          touch storage/windows.boot
-          ls -la storage/
-
-      - name: boot it
-        run: |
-          set -x
-          docker run -d --name sshinst \
-            --device=/dev/kvm --device=/dev/net/tun --cap-add NET_ADMIN \
-            -e VERSION=11 -e DISK_SIZE=64G -e RAM_SIZE=8G -e CPU_CORES=4 \
-            -e USER_PORTS=${{ github.event.inputs.port }} \
-            -p ${{ github.event.inputs.port }}:${{ github.event.inputs.port }} \
-            -p 8006:8006 --stop-timeout 180 \
-            -v "$GITHUB_WORKSPACE/storage:/storage" \
-            dockurr/windows
-          sleep 30
-          docker ps -a
-          docker logs --tail 30 sshinst || true
-
-      # Helpers the streamed script expects to already be in the container.
-      - name: stage the helpers into the container
-        run: |
-          set -x
-          mkdir -p shots
-          docker cp scripts/shotsock.py sshinst:/tmp/shotsock.py
-          docker cp scripts/guest-type.py sshinst:/tmp/guest-type.py
-
-      # A FRAME EVERY 30s, FOR THE WHOLE RUN.
-      #
-      # The wait loop reports one word per probe and keeps nothing, so a run that ends in
-      # 'unknown' or a timeout leaves no evidence at all. This runs alongside on its own
-      # clock and writes a timestamped PNG each interval, so the entire boot can be
-      # replayed afterwards in shot order. It decides nothing and never fails the job.
-      #
-      # Detached with nohup because the steps after it must not wait for it; it exits on
-      # its own deadline or when the container goes away.
-      - name: start the frame recorder
-        run: |
-          set -x
-          mkdir -p shots/frames
-          nohup bash scripts/frames-loop.sh > shots/frames/recorder.log 2>&1 &
-          echo "recorder started: pid "
-
-      # STREAMED. This is the longest step in the job - thirteen minutes on the last
-      # run - and GitHub publishes a job's log only when it finishes, so all of that
-      # time was invisible; a 804s wait went unexamined for exactly that reason.
-      # log-stream writes into a check run, which is readable while it runs.
-      - name: wait for the desktop
+      - name: boot and wait for the desktop
         uses: easydev-org/easyagent-github-ext/actions/log-stream@main
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          name: openssh-wait
+          name: openssh-boot
           interval: "20"
-          # The settings are inline rather than in an env: block. log-stream runs the
-          # string it is given; relying on it to also forward step-level env would be
-          # an assumption about the action's source that I have not read, and the
-          # failure mode would be silent - the script would fall back to its defaults
-          # and the run would look fine while testing the wrong limit.
-          command: BOOT_WAIT=${{ github.event.inputs.boot_wait }} SHOTS=shots NAME=sshinst bash scripts/openssh-wait.sh
+          command: >-
+            python3 scripts/openssh_setup.py boot
+            --container sshinst --port ${{ github.event.inputs.port }}
+            --wait ${{ github.event.inputs.boot_wait }}
 
-      - name: wait result
-        run: |
-          set -x
-          python3 scripts/ppm2png.py shots/boot.ppm shots/boot.png >/dev/null 2>&1 || true
-          python3 scripts/screen-read.py shots/boot.ppm --verbose 2>&1 | tail -3 || true
-          # The shell needs a moment after the desktop appears before Run takes focus.
-          sleep 20
+      - name: install openssh with winget
+        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: openssh-install
+          interval: "20"
+          command: >-
+            python3 scripts/openssh_setup.py install
+            --container sshinst --port ${{ github.event.inputs.port }}
 
-      - name: open PowerShell via Run
-        run: |
-          set -x
-          # THE PREVIOUS RUN TYPED INTO NOTHING.
-          #
-          # Every step reported success and winget never ran: the frames show the
-          # guest was sitting on \"Please keep your PC on and plugged in\" - Windows
-          # Update, which starts by itself right after the first desktop - while
-          # Win+R and the commands went into it. The proof is the last frame: File
-          # Explorer open on the Shared folder, because typed characters were being
-          # read as a Start-menu search instead.
-          #
-          # docker exec returning 0 only means the keys were handed to QEMU. It says
-          # nothing about whether the guest had a window to put them in. So: settle
-          # first, close any menu, and CONFIRM a PowerShell window before typing at it.
-          one() { docker cp scripts/guest-type.py sshinst:/tmp/guest-type.py >/dev/null 2>&1 || true; }
-          shot() {
-            docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/$1.ppm >/dev/null 2>&1 || true
-            docker cp sshinst:/tmp/$1.ppm shots/$1.ppm >/dev/null 2>&1 || true
-            python3 scripts/ppm2png.py shots/$1.ppm shots/$1.png >/dev/null 2>&1 || true
-            python3 scripts/screen-read.py shots/$1.ppm 2>/dev/null || echo unknown
-          }
-          one
-
-          # Let the post-install updates finish: the desktop at 780s was followed by
-          # a full-screen update prompt, and typing during it does nothing.
-          echo "settling for 5 minutes before touching the keyboard"
-          for i in 1 2 3 4 5; do
-            sleep 60
-            echo "  settle ${i}/5: $(shot settle)"
-          done
-          # Baseline taken AFTER settling: this is the bare-desktop frame every later
-          # comparison is made against. Comparing with the frame from before the
-          # update would flag any change at all as success.
-          shot baseline >/dev/null
-
-          # Escape closes the Start menu or any overlay, so Win+R reaches the shell.
-          docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock --raw "sendkey esc"
-          sleep 2
-
-          # Try Run -> powershell, twice, checking the screen each time. The check is
-          # that the frame gains a window: screen-read reports 'desktop' for a bare
-          # desktop, and a terminal over it stops it being uniform.
-          for attempt in 1 2 3; do
-            echo "launch attempt ${attempt}"
-            docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock --raw "sendkey esc"
-            sleep 1
-            docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock --raw "sendkey meta_l-r"
-            sleep 4
-            shot runbox >/dev/null
-            docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock "powershell" --enter
-            sleep 18
-            s=$(shot ps)
-            echo "  after attempt ${attempt}: stage=${s}"
-            # A PowerShell window is dark in the upper-left quadrant; the classifier
-            # cannot name it, so compare the frame against the desktop frame instead:
-            # a run box or terminal changes enough pixels to shrink the taskbar run.
-            if [ -s shots/ps.ppm ] && [ -s shots/baseline.ppm ]; then
-              if ! cmp -s shots/ps.ppm shots/baseline.ppm; then
-                echo "  screen changed after launching - assuming a window is up"
-                break
-              fi
-            fi
-          done
-
-      - name: winget install OpenSSH Server
-        run: |
-          set -x
-          port=${{ github.event.inputs.port }}
-          # SEARCH FIRST, INSTALL SECOND.
-          #
-          # The previous attempt used --id Microsoft.OpenSSH.Beta, taken from a
-          # third-party winget web page, and the guest answered:
-          #     No package found matching input criteria.
-          # with a preceding note that the msstore source wants a geographic region -
-          # so it was querying a source that cannot serve this package at all.
-          #
-          # The real ID is therefore looked up inside the guest rather than assumed,
-          # and the result is read back from a screenshot.
-          search="winget search OpenSSH --source winget --accept-source-agreements"
-          echo "typing: $search"
-          docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock "$search" --enter
-          sleep 45
-          docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/s1.ppm >/dev/null 2>&1 || true
-          docker cp sshinst:/tmp/s1.ppm shots/search.ppm >/dev/null 2>&1 || true
-          python3 scripts/ppm2png.py shots/search.ppm shots/search.png >/dev/null 2>&1 || true
-          ls -la shots/
-
-      - name: winget install OpenSSH Server
-        run: |
-          set -x
-          # --source winget keeps it away from msstore, which demands a region and does
-          # not carry this package. --disable-interactivity stops winget waiting for a
-          # keypress nobody can give.
-          cmd1="winget install --id Microsoft.OpenSSH.Preview --exact --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity"
-          echo "typing: $cmd1"
-          docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock "$cmd1" --enter
-          # POLL, DO NOT SLEEP A FIXED SIX MINUTES.
-          #
-          # winget finished in 52 seconds on every run so far, and then this waited
-          # another five minutes doing nothing - the single largest avoidable cost in
-          # the job after the boot itself. The screen is the signal: while winget is
-          # working the window shows download or install progress, and when it is done
-          # the prompt is back with no percentage on it. So the loop watches for the
-          # progress wording to disappear, with a ceiling.
-          deadline=$((SECONDS + 420))
-          while [ "$SECONDS" -lt "$deadline" ]; do
-            sleep 20
-            docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/w1.ppm >/dev/null 2>&1 || true
-            docker cp sshinst:/tmp/w1.ppm shots/winget.ppm >/dev/null 2>&1 || true
-            [ -s shots/winget.ppm ] || continue
-            if python3 scripts/screen-read.py shots/winget.ppm 2>/dev/null | grep -q installing; then
-              echo "  winget still working ($((SECONDS))s elapsed)"
-            else
-              echo "  winget appears finished after $((SECONDS))s"
-              break
-            fi
-          done
-          docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/w1.ppm >/dev/null 2>&1 || true
-          docker cp sshinst:/tmp/w1.ppm shots/winget.ppm >/dev/null 2>&1 || true
-          python3 scripts/ppm2png.py shots/winget.ppm shots/winget.png >/dev/null 2>&1 || true
-
-      - name: enable and start sshd
-        run: |
-          set -x
-          port=${{ github.event.inputs.port }}
-          # The MSI registers the sshd service but leaves it Manual, and its default
-          # sshd_config listens on 22 with password authentication commented out. Both
-          # have to be changed or the install is a no-op from the host's side.
-          #
-          # Sent as one line so a single Enter runs the lot: keystrokes are slow and
-          # every extra line is another chance to mistype into the wrong window.
-          #
-          # AND THE FIREWALL. REBAKE.md records that the real golden disk has
-          # EnableFirewall=0 across all profiles, baked in as registry state - but this
-          # disk came straight from Setup, where the firewall is ON, and the winget MSI
-          # does not add an inbound rule for its own port. sshd listening and the host
-          # seeing nothing is exactly what that produces. Rather than depend on a rule
-          # being created, the firewall is turned off the same way the project's own
-          # golden disk has it - plus an explicit rule for the port, so either mechanism
-          # alone is enough.
-          # One line, because keystrokes are slow and every extra line is another
-          # chance to type into the wrong window. But every stage now CHECKS ITSELF,
-          # because the previous version reported success while doing nothing:
-          #
-          #   + FullyQualifiedErrorId : CouldNotStopService,RestartServiceCommand
-          #
-          # Restart-Service stops then starts, and it raises CouldNotStopService when the
-          # service is not currently running - which is what happened: Start-Service on
-          # the line before had not taken effect. PowerShell does not abort on that, so
-          # the firewall rule after it succeeded and the step exited 0 with sshd still on
-          # port 22 and nothing listening on our port.
-          #
-          # So: only stop a service that is running, verify it is running after start,
-          # then print the listening socket as proof rather than assuming the config
-          # change took effect.
-          fix="Set-Service sshd -StartupType Automatic -ErrorAction Stop; Stop-Service sshd -Force -ErrorAction SilentlyContinue; (Get-Content C:\\ProgramData\\ssh\\sshd_config) -replace '^#?\\s*Port\\s+.*','Port $port' -replace '^#?\\s*PasswordAuthentication\\s+.*','PasswordAuthentication yes' | Set-Content C:\\ProgramData\\ssh\\sshd_config; Start-Service sshd -ErrorAction Stop; Start-Sleep 3; Set-NetFirewallProfile -All -Enabled False; New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH Server' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort $port -ErrorAction SilentlyContinue | Out-Null; Write-Output '--- service ---'; Get-Service sshd | Select-Object Status,StartType | Format-List; Write-Output '--- listening ---'; Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort | Format-Table; Write-Output '--- config ---'; (Get-Content C:\\ProgramData\\ssh\\sshd_config) -match '^(Port|PasswordAuthentication)'"
-          echo "typing: $fix"
-          docker exec sshinst python3 /tmp/guest-type.py /run/shm/monitor.sock "$fix" --enter
-          sleep 40
-          docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/f1.ppm >/dev/null 2>&1 || true
-          docker cp sshinst:/tmp/f1.ppm shots/sshd.ppm >/dev/null 2>&1 || true
-          python3 scripts/ppm2png.py shots/sshd.ppm shots/sshd.png >/dev/null 2>&1 || true
-
-      # STREAMED, like the wait above. These are the steps that answer the port
-      # question, and a step log is published only when the whole job ends - which is
-      # why every answer about this port arrived after the fact, and why I chased the
-      # wrong layer twice.
-      #
-      # Measured so far: the guest answers on 127.0.0.1:2222 (True); the container
-      # reaches 172.30.0.2:2222 (open); the host sees nothing on the published port.
-      # QEMU has no hostfwd, because NET_ADMIN makes dockur use a tap bridge with the
-      # One Python step instead of a 240-line shell script. The shell version carried a
-      # comment for every fault it had suffered - the DNAT that hijacked the relay, the bind
-      # address that answered only itself, the six-second read that called a live port dead.
-      # The work itself is short; openssh_forward.py states it once.
       - name: forward the port into the guest
         uses: easydev-org/easyagent-github-ext/actions/log-stream@main
         with:
@@ -388,15 +118,11 @@ jobs:
           name: openssh-forward
           interval: "15"
           command: >-
-            python3 scripts/openssh_forward.py
+            python3 scripts/openssh_setup.py forward
             --container sshinst --port ${{ github.event.inputs.port }}
 
-      # rejecting "win-host\docker" (that is how whoami prints), and a glob with an
-      # escaped backslash that could never match.
-      #
-      # scripts/openssh_verify.py does the same work with the parsing in Python, and
-      # `--selftest` replays those exact log strings offline. The check can now be
-      # checked before it is trusted, which is what all the shell versions lacked.
+      # Runs even if earlier steps failed: a failure above should still tell us whether the
+      # port or the login worked, and reporting that is cheaper than another run.
       - name: verify ssh end to end
         if: always()
         uses: easydev-org/easyagent-github-ext/actions/log-stream@main
@@ -405,58 +131,13 @@ jobs:
           name: openssh-verify
           interval: "15"
           command: >-
-            python3 scripts/openssh_verify.py
+            python3 scripts/openssh_setup.py verify
             --port ${{ github.event.inputs.port }}
-            --user docker --password admin
-            --attempts 6 --wait 30
+            --user docker --password admin --attempts 6
 
-
-      - name: keep the final frame
-        if: always()
-        run: |
-          set -x
-          docker exec sshinst python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/f2.ppm >/dev/null 2>&1 || true
-          docker cp sshinst:/tmp/f2.ppm shots/final.ppm >/dev/null 2>&1 || true
-          python3 scripts/ppm2png.py shots/final.ppm shots/final.png >/dev/null 2>&1 || true
-      # Turn the frames into a timeline before uploading: one line per frame with its
-      # elapsed time and verdict, plus an index.html that shows them all in order.
-      - name: summarise the frames
-        if: always()
-        run: |
-          set -x
-          python3 scripts/frames-report.py shots/frames || true
-          echo "--- timeline (frame, t seconds, stage) ---"
-          cat shots/frames/frames.tsv 2>/dev/null || echo "  (no frames recorded)"
-
-      # EXPORT THE WORKED-ON DISK, so this never has to be repeated.
-      #
-      # Every attempt so far has started from the same golden image and spent ~20
-      # minutes booting Windows just to arrive at the same desktop. Once the work is
-      # done the disk itself is the result, and re-running from it skips nothing about
-      # the boot but does skip everything after it - and more importantly it makes the
-      # state durable instead of being thrown away with the container.
-      #
-      # The guest is stopped first, or the filesystem is mid-write and the copy is not
-      # a snapshot of anything. bootstate goes with it for the same reason it does in
-      # bake: windows.vars carries the UEFI boot entry and the disk will not start
-      # without it.
       - name: export the disk
         if: always() && github.event.inputs.export_disk == 'yes'
-        run: |
-          set -x
-          docker stop -t 180 sshinst || true
-          mkdir -p out
-          docker cp sshinst:/storage/data.img out/data.img
-          ls -la out/
-          qemu-img convert -O qcow2 out/data.img out/windows-openssh.qcow2
-          qemu-img info out/windows-openssh.qcow2 | head -6
-          rm -f out/data.img
-          for f in windows.vars windows.ver windows.base windows.mac windows.rom; do
-            docker cp "sshinst:/storage/$f" "out/$f" 2>/dev/null || echo "  missing $f"
-          done
-          ls -la out/
-          tar czf out/windows-openssh.qcow2.bootstate.tar.gz             -C out windows.vars windows.ver windows.base windows.mac windows.rom 2>/dev/null || true
-          ls -la out/
+        run: python3 scripts/openssh_setup.py export --container sshinst
 
       - uses: actions/upload-artifact@v4
         if: always()
