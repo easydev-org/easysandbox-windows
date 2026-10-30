@@ -299,7 +299,7 @@ def selftest():
         ("msvc-check.ps1", ["Installer" + bslash + "vswhere.exe",
                             "Build" + bslash + "vcvars64.bat", "hello-from-msvc"]),
         ("vs-workload.ps1", ["Installer" + bslash + "vswhere.exe",
-                             "vs_installer.exe", "Workload.VCTools"]),
+                             "setup.exe", "Start-Process", "Workload.VCTools"]),
     ]:
         path = os.path.join(HERE, "ps", name)
         if not os.path.exists(path):
