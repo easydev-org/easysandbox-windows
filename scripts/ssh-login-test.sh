@@ -54,7 +54,14 @@ for i in $(seq 1 "$ATTEMPTS"); do
   first=$(printf "%s" "$out" | tr -d "\r" | sed -n "1p" | tr -d " ")
   second=$(printf "%s" "$out" | tr -d "\r" | sed -n "2p" | tr -d " ")
   host=$(printf "%s" "$out" | tr -d "\r" | sed -n "3p" | tr -d "\r")
-  if [ "$first" = "SSH-OK" ] && [ "$second" = "$USER_NAME" ] && [ -n "$host" ]; then
+  # whoami on Windows returns COMPUTERNAME\user, not the bare user name - that is
+  # standard, and matching only 'docker' rejected every successful login. Accept the
+  # name as the last path component.
+  case "$second" in
+    "$USER_NAME"|"*\$USER_NAME") second_ok=1 ;;
+    *) second_ok=0 ;;
+  esac
+  if [ "$first" = "SSH-OK" ] && [ "$second_ok" = "1" ] && [ -n "$host" ]; then
     echo "  VERIFIED: logged in as $USER_NAME, shell ran whoami and hostname"
     echo "    host: $host"
     exit 0
