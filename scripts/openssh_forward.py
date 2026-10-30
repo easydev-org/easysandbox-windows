@@ -182,15 +182,27 @@ def main(argv=None):
     xsh.docker_exec(name, CLEANUP, echo=True)
 
     print("--- can the container reach the guest's sshd? ---", flush=True)
-    probe = xsh.docker_exec(
-        name,
-        "if timeout 5 sh -c 'echo > /dev/tcp/%s/%d' 2>/dev/null; then echo open; "
-        "else echo closed; fi\n" % (guest_ip, port),
-        echo=False,
-    )
-    if "open" not in probe.out:
-        xsh.need(False, "the container cannot reach %s:%d - the guest's sshd is not up, so a "
-                        "relay would have nothing to forward to" % (guest_ip, port))
+    # RETRIED, because sshd has just been started by typing into the guest and the socket
+    # may not be listening yet. The screenshot taken at the end of the install step shows
+    # 'LocalAddress 0.0.0.0  LocalPort 2222' and 'Status: Running', so a single failed probe
+    # 22 seconds later was measuring the gap, not the service.
+    deadline = time.time() + 120
+    reachable = False
+    while time.time() < deadline:
+        probe = xsh.docker_exec(
+            name,
+            "if timeout 5 sh -c 'echo > /dev/tcp/%s/%d' 2>/dev/null; then echo open; "
+            "else echo closed; fi\n" % (guest_ip, port),
+            echo=False,
+        )
+        if "open" in probe.out:
+            reachable = True
+            break
+        print("  %s:%d not reachable yet; retrying" % (guest_ip, port), flush=True)
+        time.sleep(10)
+    xsh.need(reachable, "the container still cannot reach %s:%d after 120s - sshd is not "
+                        "listening there, so a relay would have nothing to forward to"
+             % (guest_ip, port))
     print("  direct: open", flush=True)
 
     print("--- starting the relay on all addresses ---", flush=True)
