@@ -27,6 +27,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.request
 
 # The packages now live in the organisation that owns this repository, so the
@@ -101,25 +102,46 @@ def main():
             dg = l["digest"]
             sz = l["size"]
             print(f"  layer {i + 1}/{len(layers)}  {sz / 1024 ** 2:8.1f} MB  {dg[:22]}", flush=True)
-            with tempfile.NamedTemporaryFile(suffix=".blob", delete=False) as blob:
-                bpath = blob.name
-            try:
-                with get(f"https://{REG}/v2/{OWNER}/{repo}/blobs/{dg}", tok) as r, open(bpath, "wb") as bf:
-                    while True:
-                        chunk = r.read(1 << 20)
-                        if not chunk:
-                            break
-                        bf.write(chunk)
-                # Each layer is a tar holding one part file.
-                with tarfile.open(bpath, "r:*") as tf:
-                    parts = [m for m in tf.getmembers() if m.isfile()]
-                    if not parts:
-                        sys.exit(f"layer {i} contains no file")
-                    data = tf.extractfile(parts[0]).read()
-                fh.write(data)
-                print(f"        -> {len(data) / 1024 ** 2:.1f} MB extracted", flush=True)
-            finally:
-                os.unlink(bpath)
+
+            # RETRIED. A layer is up to 1 GiB and the connection can end part-way through:
+            # one run failed with tarfile.ReadError: unexpected end of data after 400
+            # seconds of downloading. That is a truncated blob, not a bad manifest. Runners
+            # go through a proxy to a CDN and neither promises the whole body first time.
+            data = None
+            last = None
+            for attempt in range(1, 5):
+                fd, bpath = tempfile.mkstemp(suffix=".blob")
+                os.close(fd)
+                try:
+                    url = "https://%s/v2/%s/%s/blobs/%s" % (REG, OWNER, repo, dg)
+                    with get(url, tok) as r, open(bpath, "wb") as bf:
+                        while True:
+                            chunk = r.read(1 << 20)
+                            if not chunk:
+                                break
+                            bf.write(chunk)
+                    got = os.path.getsize(bpath)
+                    if got != sz:
+                        raise IOError("short layer: %d of %d bytes" % (got, sz))
+                    with tarfile.open(bpath, "r:*") as tf:
+                        parts = [m for m in tf.getmembers() if m.isfile()]
+                        if not parts:
+                            raise IOError("layer %d contains no file" % i)
+                        data = tf.extractfile(parts[0]).read()
+                    break
+                except Exception as exc:
+                    last = exc
+                    print("        attempt %d failed: %s; retrying" % (attempt, str(exc)[:80]), flush=True)
+                    if attempt >= 4:
+                        sys.exit("layer %d could not be downloaded after 4 attempts: %s" % (i + 1, last))
+                    time.sleep(5 * attempt)
+                finally:
+                    try:
+                        os.unlink(bpath)
+                    except OSError:
+                        pass
+            fh.write(data)
+            print("        -> %.1f MB extracted" % (len(data) / 1024 ** 2), flush=True)
 
     if want:
         got = subprocess.run(["sha256sum", tmp], capture_output=True, text=True).stdout.split()[0]
