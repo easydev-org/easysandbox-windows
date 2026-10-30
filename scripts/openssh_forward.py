@@ -158,6 +158,16 @@ def main(argv=None):
     name = args.container
     port = args.port
 
+    # IS THE CONTAINER THERE AT ALL? Without this the failure read as
+    #     no eth0 address; cannot know where docker forwards
+    # while the real answer was 'container ... is not running'. A networking conclusion from
+    # an absent container is the wrong question answered confidently.
+    ps = xsh.run(["docker", "ps", "--format", "{{.Names}}", "--filter",
+                  "name=^%s" % name], echo=False)
+    xsh.need(name in (ps.out or "").split(),
+             "container %r is not running - nothing to forward through. It may have stopped "
+             "during an earlier stage." % name)
+
     print("--- where the guest is ---", flush=True)
     logs = xsh.run(["docker", "logs", name], echo=False).text
     guest_ip = parse_guest_ip(logs) or "172.30.0.2"

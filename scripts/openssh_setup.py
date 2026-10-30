@@ -259,6 +259,32 @@ def stage_install(args):
     statements = [l for l in body.splitlines() if l.strip()]
     g.run_script(statements, settle=20)
     g.screenshot("sshd")
+
+    # CONFIRM THE CONTAINER IS STILL UP, and that sshd is listening, before a later stage
+    # discovers it is not. The run that led here reported this step as success, and the next
+    # step then failed with
+    #     container ... is not running
+    # which says the guest had gone away between the two. Taking a screenshot proves the
+    # screen at that instant and nothing after it.
+    up = xsh.run(["docker", "ps", "--format", "{{.Names}}", "--filter",
+                  "name=^%s" % args.container], echo=False)
+    running = args.container in (up.out or "").split()
+    print("  container running: %s" % running, flush=True)
+    if not running:
+        logs = xsh.run(["docker", "logs", "--tail", "30", args.container], echo=False)
+        print("  --- container log ---", flush=True)
+        for line in (logs.text or "").splitlines()[-15:]:
+            print("    " + line[:140], flush=True)
+        xsh.need(False, "the guest stopped during install; sshd cannot be verified")
+
+    # And that sshd is actually listening on the port, by asking inside the guest rather
+    # than reading a screenshot.
+    probe = guest.Guest(args.container, args.shots)
+    probe.powershell(
+        "Get-NetTCPConnection -State Listen -LocalPort %d -ErrorAction SilentlyContinue | "
+        "Select-Object -First 1 LocalAddress,LocalPort" % args.port, settle=15)
+    probe.screenshot("listen")
+    print("  asked the guest for a listener on %d" % args.port, flush=True)
     return 0
 
 
