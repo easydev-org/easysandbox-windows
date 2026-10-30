@@ -377,21 +377,20 @@ jobs:
       # Measured so far: the guest answers on 127.0.0.1:2222 (True); the container
       # reaches 172.30.0.2:2222 (open); the host sees nothing on the published port.
       # QEMU has no hostfwd, because NET_ADMIN makes dockur use a tap bridge with the
-      # guest on its own address. So what is missing is a process listening on the
-      # container port: docker proxy delivers the connection where nothing is bound,
-      # which is why the nat rule had no effect.
-      - name: probe the network path and start the relay
+      # One Python step instead of a 240-line shell script. The shell version carried a
+      # comment for every fault it had suffered - the DNAT that hijacked the relay, the bind
+      # address that answered only itself, the six-second read that called a live port dead.
+      # The work itself is short; openssh_forward.py states it once.
+      - name: forward the port into the guest
         uses: easydev-org/easyagent-github-ext/actions/log-stream@main
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           name: openssh-forward
           interval: "15"
-          command: PORT=${{ github.event.inputs.port }} NAME=sshinst bash scripts/openssh-forward.sh
-      # ONE STEP, IN PYTHON, with the three stages reported separately.
-      #
-      # This replaces two shell steps that between them produced four wrong verdicts - a
-      # false green when the command was echoed into an ssh warning, and three false reds:
-      # rejecting "SSH-OK; whoami; hostname" (cmd.exe does not treat ";" as a separator),
+          command: >-
+            python3 scripts/openssh_forward.py
+            --container sshinst --port ${{ github.event.inputs.port }}
+
       # rejecting "win-host\docker" (that is how whoami prints), and a glob with an
       # escaped backslash that could never match.
       #
