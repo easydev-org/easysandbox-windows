@@ -61,9 +61,10 @@ def stage_place(args):
     xsh.run(["qemu-img", "convert", "-O", "raw", local, "storage/data.img"], check=True)
     os.unlink(local)
     size = os.path.getsize("storage/data.img")
-    print("  converted: %d bytes" % size, flush=True)
-    xsh.need(size == 68719476736,
-             "conversion incomplete: expected 68719476736 bytes, got %d" % size)
+    expect = virtual_size(disk) or size
+    print("  converted: %d bytes (source virtual size %d)" % (size, expect), flush=True)
+    xsh.need(size == expect,
+             "conversion incomplete: expected %d bytes, got %d" % (expect, size))
     nonzero = 0
     with open("storage/data.img", "rb") as f:
         for off in (0, 512, 1 << 20, size // 4, size // 2, size * 3 // 4):
@@ -86,6 +87,18 @@ def stage_place(args):
     return 0
 
 
+def virtual_size(path):
+    """The disk size QEMU will present, read from qemu-img rather than assumed.
+
+    This was hard-coded to 64 GiB, which is the size bake-golden produces. Then a disk
+    published from a different bake came back at 128 GiB and the check failed with
+    "conversion incomplete: 137438953472 bytes" - a true measurement of the disk, compared
+    against a number about a different disk. The check is worth keeping; the constant was not.
+    """
+    out = xsh.run(["qemu-img", "info", path], echo=False).out or ""
+    return _read_virtual_size(out)
+
+
 def stage_disk(args):
     """Make storage/data.img from the artifact, and prove it is complete.
 
@@ -106,9 +119,10 @@ def stage_disk(args):
     xsh.run(["qemu-img", "convert", "-O", "raw", disk, "storage/data.img"], check=True)
 
     size = os.path.getsize("storage/data.img")
-    print("  converted: %d bytes" % size, flush=True)
-    xsh.need(size == 68719476736,
-             "conversion incomplete: expected 68719476736 bytes, got %d" % size)
+    expect = virtual_size(disk) or size
+    print("  converted: %d bytes (source virtual size %d)" % (size, expect), flush=True)
+    xsh.need(size == expect,
+             "conversion incomplete: expected %d bytes, got %d" % (expect, size))
 
     # Right size but all zeroes is still possible; sample a few offsets.
     nonzero = 0
@@ -322,6 +336,38 @@ def stage_publish(args):
     return 0
 
 
+def selftest_virtual_size():
+    """The disk-size check, against the two formats qemu-img actually prints.
+
+    Hard-coded to 64 GiB first, then matched with a pattern that assumed the bare-bytes form.
+    qemu-img prints  'virtual size: 128 GiB (137438953472 bytes)'  when the size is a whole
+    number of GiB and  'virtual size: 21474836480 bytes'  when it is not - so a reader that
+    only knows one of them reports None on the other, and the check then falls back to
+    comparing the file with itself and passing for the wrong reason.
+    """
+    cases = [
+        ("with a GiB prefix", "virtual size: 128 GiB (137438953472 bytes)", 137438953472),
+        ("64 GiB", "virtual size: 64 GiB (68719476736 bytes)", 68719476736),
+        ("bare bytes", "virtual size: 21474836480 bytes", 21474836480),
+        ("absent", "no size here", None),
+    ]
+    bad = 0
+    for desc, text, want in cases:
+        got = _read_virtual_size(text)
+        bad += got != want
+        print("  %s virtual-size %-18s -> %s" % ("ok " if got == want else "FAIL", desc, got))
+    print("  %s" % ("virtual-size cases passed" if bad == 0 else "%d FAILED" % bad))
+    return 0 if bad == 0 else 1
+
+
+def _read_virtual_size(text):
+    import re as _re
+    m = _re.search(r"virtual size:[ ]*(?:[0-9.]+[ ]*[KMGT]iB[ ]*)?\(([0-9]+) bytes\)", text or "")
+    if not m:
+        m = _re.search(r"virtual size:[ ]*([0-9]+) bytes", text or "")
+    return int(m.group(1)) if m else None
+
+
 def main(argv=None):
     argv = argv if argv is not None else sys.argv[1:]
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -345,6 +391,7 @@ def main(argv=None):
     if args.stage == "selftest":
         rc = openssh_verify.main(["--selftest"])
         rc |= openssh_forward.main(["--selftest"])
+        rc |= selftest_virtual_size()
         return rc
 
     return {

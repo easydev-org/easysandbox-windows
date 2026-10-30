@@ -142,7 +142,10 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     if args.selftest:
-        sys.exit(selftest())
+        # Return rather than exit: openssh_setup.py calls this to chain several selftests,
+        # and sys.exit here would end the process after the first one - silently skipping
+        # the rest while still reporting success.
+        return selftest()
 
     target = "%s:%d" % (args.host, args.port)
     for attempt in range(1, args.attempts + 1):
