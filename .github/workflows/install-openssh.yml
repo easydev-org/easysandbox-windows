@@ -34,7 +34,9 @@ on:
         required: false
         default: "base-latest"
       bootstate_run:
-        description: "Run id holding the bootstate artifact (optional)"
+        description: "Run id of the bake that published this disk; its bootstate artifact
+          carries windows.vars, without which the firmware has no boot entry and the guest
+          never starts. Required in practice - place refuses without it."
         required: false
         default: ""
       boot_wait:
