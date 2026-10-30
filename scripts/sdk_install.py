@@ -64,6 +64,12 @@ PACKAGES = [
      "installed bare, then modified to add VCTools"),
     ("Microsoft.WindowsSDK.10.0.26100", None, "the SDK on its own"),
     ("Microsoft.DotNet.SDK.10", None, "the .NET SDK, which VCTools does not include"),
+    # PowerShell 7. The identifier is Microsoft.PowerShell with no version in it - the
+    # manifests live under manifests/m/Microsoft/PowerShell/<version>/, but the id itself is
+    # version-free, which is different from WindowsSDK.10.0.26100 above. Read from
+    # Microsoft.PowerShell.yaml, not inferred from the folder name - that inference is what
+    # produced a non-existent id for the SDK.
+    ("Microsoft.PowerShell", None, "PowerShell 7, alongside the Windows PowerShell 5.1"),
 ]
 
 
@@ -226,6 +232,21 @@ def stage_verify(port, user, password):
         if not present:
             failures.append(pid)
 
+    # pwsh is the PowerShell 7 binary; Windows PowerShell 5.1 is powershell.exe. Checking the
+    # executable rather than only the winget entry, because 'installed' and 'runs' differ.
+    # pwsh is the PowerShell 7 binary; Windows PowerShell 5.1 is powershell.exe. Checked by
+    # running it, not by reading the winget entry - installed and runs are different claims.
+    #   pwsh -v  prints just the version, and needs no quotes or dollar signs.
+    print("--- pwsh ---", flush=True)
+    r = ssh_run(port, user, password, "pwsh -v", timeout=300)
+    pwsh_out = ((r.out or "") + (r.err or "")).strip()
+    version_line = pwsh_out.splitlines()[-1].strip() if pwsh_out else ""
+    print("  %s" % (version_line[:60] or "(no output)"), flush=True)
+    if version_line[:1].isdigit():
+        print("  PowerShell %s" % version_line, flush=True)
+    else:
+        failures.append("pwsh")
+
     print("--- dotnet ---", flush=True)
     r = ssh_run(port, user, password, "dotnet --version", timeout=300)
     print("  %s" % ((r.out or r.err or "").strip()[:120] or "(no output)"), flush=True)
@@ -272,6 +293,8 @@ def selftest():
         ("buildtools present", listing, "Microsoft.VisualStudio.2022.BuildTools", True),
         ("dotnet present", listing, "Microsoft.DotNet.SDK.10", True),
         ("windows sdk absent", listing, "Microsoft.WindowsSDK.10", False),
+        ("powershell present", listing + "PowerShell 7.6.9  Microsoft.PowerShell  7.6.9" + chr(10),
+         "Microsoft.PowerShell", True),
         ("empty listing", "", "Microsoft.DotNet.SDK.10", False),
     ]:
         got = parse_winget_list(text, pid)
