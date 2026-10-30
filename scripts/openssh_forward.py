@@ -30,6 +30,7 @@ things worse:
 """
 import argparse
 import re
+import shlex
 import sys
 import time
 
@@ -189,12 +190,13 @@ def main(argv=None):
     deadline = time.time() + 120
     reachable = False
     while time.time() < deadline:
-        probe = xsh.docker_exec(
-            name,
-            "if timeout 5 sh -c 'echo > /dev/tcp/%s/%d' 2>/dev/null; then echo open; "
-            "else echo closed; fi\n" % (guest_ip, port),
-            echo=False,
-        )
+        # A PYTHON PROBE, not /dev/tcp. The container sh is dash, which has no /dev/tcp
+        # redirection - every probe died with
+        #     sh: 1: cannot create /dev/tcp/172.30.0.2/2222: Directory nonexistent
+        # and that was read as "the port is closed" for two rounds. ping showed the guest
+        # reachable with 0% loss and its ARP entry REACHABLE the whole time.
+        probe_code = ('import socket\ns=socket.socket(); s.settimeout(5)\ntry:\n    s.connect(("GUEST", PORT))\n    print("open")\nexcept Exception as e:\n    print("closed", e)\n').replace("GUEST", guest_ip).replace("PORT", str(port))
+        probe = xsh.docker_exec(name, "python3 -c " + shlex.quote(probe_code) + "\n", echo=False)
         if "open" in probe.out:
             reachable = True
             break
