@@ -24,7 +24,7 @@ for i in $(seq 1 "$ATTEMPTS"); do
   out=$(sshpass -p "$PASSWORD" ssh -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 \
         -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-        -p "$PORT" "$USER_NAME@$HOST" "echo SSH-OK; whoami; hostname" 2>/tmp/ssherr.$$ || true)
+        -p "$PORT" "$USER_NAME@$HOST" "echo SSH-OK && whoami && hostname" 2>/tmp/ssherr.$$ || true)
   err=$(cat /tmp/ssherr.$$ 2>/dev/null | tr -d "\r" | tr "\n" " "); rm -f /tmp/ssherr.$$
   flat=$(printf "%s" "$out" | tr -d "\r" | tr "\n" " ")
   echo "    stdout: ${flat:-<empty>}"
@@ -42,18 +42,24 @@ for i in $(seq 1 "$ATTEMPTS"); do
   # The real thing has three lines and no warning:  SSH-OK / the user / the hostname.
   # So: require a line that is EXACTLY SSH-OK, and require the second line to be the
   # user name, and reject any output that still contains the semicolons (an echo).
-  case "$out" in
-    *';'*) echo "  not verified: the output still contains the command line, so it was echoed";;
-    *)
-      second=$(printf "%s" "$out" | tr -d "\r" | sed -n "2p" | tr -d " ")
-      if printf "%s" "$out" | tr -d "\r" | grep -qx "SSH-OK" && [ "$second" = "$USER_NAME" ]; then
-        echo "  VERIFIED: logged in as $USER_NAME, shell responded with its hostname"
-        echo "    host: $(printf "%s" "$out" | tr -d "\r" | sed -n "3p")"
-        exit 0
-      fi
-      echo "  not verified: SSH-OK line or user line missing"
-      ;;
-  esac
+  # THREE LINES: SSH-OK, the user, the hostname.
+  #
+  # The separator matters more than it looks. Windows ssh runs commands through cmd.exe,
+  # where ';' is not a separator - it is an ordinary character. So
+  #     echo SSH-OK; whoami; hostname
+  # prints the whole string back, which is what every previous attempt saw and what made
+  # me add a rule rejecting ';' as 'echoed rather than executed'. That rule was wrong:
+  # the login had worked, cmd.exe had simply been told to echo one long word.
+  # '&&' is a separator in cmd.exe, so the command now really runs three of them.
+  first=$(printf "%s" "$out" | tr -d "\r" | sed -n "1p" | tr -d " ")
+  second=$(printf "%s" "$out" | tr -d "\r" | sed -n "2p" | tr -d " ")
+  host=$(printf "%s" "$out" | tr -d "\r" | sed -n "3p" | tr -d "\r")
+  if [ "$first" = "SSH-OK" ] && [ "$second" = "$USER_NAME" ] && [ -n "$host" ]; then
+    echo "  VERIFIED: logged in as $USER_NAME, shell ran whoami and hostname"
+    echo "    host: $host"
+    exit 0
+  fi
+  echo "  not verified: wanted three lines 'SSH-OK' / '$USER_NAME' / hostname, got those above"
   sleep 15
 done
 
