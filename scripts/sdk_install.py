@@ -53,7 +53,7 @@ PACKAGES = [
     # --nocache was in the first version and the VS installer rejected it with exit 87
     # (ERROR_INVALID_PARAMETER) - it is not one of its switches.
     ("Microsoft.VisualStudio.2022.BuildTools",
-     "--quiet --wait --norestart "
+     "--quiet --wait --norestart --accept-license "
      "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended",
      "MSVC, the Windows SDK and CMake; a bare install has no cl.exe"),
     ("Microsoft.WindowsSDK.10.0.26100", None, "the SDK on its own"),
@@ -139,15 +139,34 @@ def stage_install(port, user, password):
             continue
         print("=== %s ===" % pid, flush=True)
         print("  %s" % why, flush=True)
-        parts = ["winget", "install", "--id", pid, "--exact", "--source", "winget",
-                 "--accept-source-agreements", "--accept-package-agreements",
-                 "--disable-interactivity"]
-        # A package that needs installer switches gets --custom with the whole switch string
-        # as one argument. Not --override, which replaces winget's own switches and cannot be
-        # combined with the accept flags.
         if extra:
-            parts += ["--custom", '"' + extra + '"']
-        cmd = " ".join(parts)
+            # A BATCH FILE, not a command line. The switch string crosses ssh -> cmd.exe ->
+            # winget -> vs_installer, and exit 87 (ERROR_INVALID_PARAMETER) is what the
+            # installer returns when the quotes have been eaten by one of those layers. A
+            # file has no layers above it.
+            script = ("@echo off" + chr(13) + chr(10)
+                      + "winget install --id " + pid + " --exact --source winget "
+                      + "--accept-source-agreements --disable-interactivity "
+                      + "--override " + chr(34) + extra + chr(34) + chr(13) + chr(10))
+            remote = "C:/Users/%s/install-%s.bat" % (user, pid.replace(".", "-"))
+            fd, local = tempfile.mkstemp(suffix=".bat")
+            with os.fdopen(fd, "w", newline="") as f:
+                f.write(script)
+            try:
+                xsh.run(["sshpass", "-p", password, "scp",
+                         "-o", "StrictHostKeyChecking=no",
+                         "-o", "UserKnownHostsFile=/dev/null",
+                         "-P", str(port), local, "%s@127.0.0.1:%s" % (user, remote)],
+                        echo=False, timeout=120)
+            finally:
+                os.unlink(local)
+            cmd = 'cmd /c "%s"' % remote.replace("/", chr(92))
+        else:
+            cmd = " ".join([
+                "winget", "install", "--id", pid, "--exact", "--source", "winget",
+                "--accept-source-agreements", "--accept-package-agreements",
+                "--disable-interactivity",
+            ])
         print("  running: %s" % cmd, flush=True)
         # BuildTools with a workload is slow; ten minutes is ordinary on a fresh machine.
         r = ssh_run(port, user, password, cmd, timeout=3600)
