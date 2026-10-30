@@ -115,8 +115,18 @@ class Guest:
         xsh.run(["docker", "exec", self.container, "python3", "/tmp/shotsock.py", mon, remote],
                 echo=False)
         local = os.path.join(self.shot_dir, "%s.ppm" % tag)
+        # REMOVE A STALE FILE FIRST. docker cp leaves the destination untouched when the
+        # copy fails, so a frame from an earlier call would be returned as if it were new -
+        # and getsize() on a file that was never written raises FileNotFoundError, which is
+        # how the first run of the Python bake died one second in.
+        try:
+            os.unlink(local)
+        except OSError:
+            pass
         xsh.run(["docker", "cp", "%s:%s" % (self.container, remote), local], echo=False)
-        return local if os.path.getsize(local) > 0 else None
+        if os.path.exists(local) and os.path.getsize(local) > 0:
+            return local
+        return None
 
     def type_text(self, text, enter=False):
         """Type text into the guest via HMP sendkey. No shell is involved anywhere.
