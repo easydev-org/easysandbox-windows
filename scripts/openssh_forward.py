@@ -200,6 +200,27 @@ def main(argv=None):
             break
         print("  %s:%d not reachable yet; retrying" % (guest_ip, port), flush=True)
         time.sleep(10)
+    if not reachable:
+        # SAY WHY, not just that it failed. The guest's own screenshot shows sshd listening
+        # on 0.0.0.0:2222 with the service Running, so 'not reachable' from here means the
+        # two hosts cannot exchange packets - a different fault from 'sshd is down'.
+        # SAY WHY, not just that it failed. The guest screenshot shows sshd listening on
+        # 0.0.0.0:2222 with the service Running, so not reachable from here means the two
+        # hosts cannot exchange packets - a different fault from sshd being down.
+        print("--- why the container cannot reach the guest ---", flush=True)
+        script = "\n".join([
+            "echo --- routes ---",
+            "ip route",
+            "echo --- neighbours ---",
+            "ip neigh show || true",
+            "echo --- ping ---",
+            "ping -c 2 -W 2 %s 2>&1 | tail -3 || true" % guest_ip,
+            "echo --- tcp error ---",
+            "timeout 5 sh -c 'echo > /dev/tcp/%s/%d' 2>&1 | tail -2 || true" % (guest_ip, port),
+        ]) + "\n"
+        diag = xsh.docker_exec(name, script, echo=False)
+        for line in diag.out.splitlines():
+            print("  " + line, flush=True)
     xsh.need(reachable, "the container still cannot reach %s:%d after 120s - sshd is not "
                         "listening there, so a relay would have nothing to forward to"
              % (guest_ip, port))
