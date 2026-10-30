@@ -193,9 +193,39 @@ def main(argv=None):
     xsh.need(container_ip, "no eth0 address; cannot know where docker forwards")
     print("  docker forwards to: %s" % container_ip, flush=True)
 
-    print("--- ip_forward ---", flush=True)
-    xsh.docker_exec(name, "sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true\n"
-                          "cat /proc/sys/net/ipv4/ip_forward\n", echo=False)
+    print("--- ip_forward and the rules that let the guest out ---", flush=True)
+    # THE GUEST NEEDS TO REACH THE INTERNET, and ip_forward alone does not do it.
+    #
+    # dockur with NET_ADMIN and /dev/net/tun builds a tap bridge (172.30.0.0/24) instead of
+    # using QEMU user-mode NAT. Packets from the guest then reach this container and stop:
+    # without POSTROUTING MASQUERADE they leave with the guest address, which nothing
+    # outside can route back, and without the two FORWARD accepts the filter table drops the
+    # flow even when nat is right.
+    #
+    # Measured symptom: nslookup resolved cdn.winget.microsoft.com correctly (dockur dnsmasq
+    # answers from inside the container, so DNS never leaves it) while every TCP connection
+    # to 443 failed, and winget returned exit 255 with
+    #     Failed in attempting to update the source: winget
+    #
+    # These are the three rules sandbox.sh uses for the same bridge.
+    net = args.bridge_ip.rsplit(".", 1)[0] + ".0/24"
+    cmds = [
+        "sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true",
+        "cat /proc/sys/net/ipv4/ip_forward",
+        "iptables -t nat -C POSTROUTING -s {n} ! -d {n} ! -o {b} -j MASQUERADE 2>/dev/null || "
+            "iptables -t nat -A POSTROUTING -s {n} ! -d {n} ! -o {b} -j MASQUERADE".format(n=net, b=bridge),
+        "iptables -C FORWARD -s {n} -i {b} ! -o {b} -j ACCEPT 2>/dev/null || "
+            "iptables -A FORWARD -s {n} -i {b} ! -o {b} -j ACCEPT".format(n=net, b=bridge),
+        "iptables -C FORWARD -d {g} ! -i {b} -o {b} -j ACCEPT 2>/dev/null || "
+            "iptables -A FORWARD -d {g} ! -i {b} -o {b} -j ACCEPT".format(g=guest_ip, b=bridge),
+        "echo --- POSTROUTING ---",
+        "iptables -t nat -S POSTROUTING | head -6",
+        "echo --- FORWARD ---",
+        "iptables -S FORWARD | head -6",
+    ]
+    out = xsh.docker_exec(name, chr(10).join(cmds) + chr(10), echo=False)
+    for line in (out.out or out.err or "").splitlines()[:14]:
+        print("  " + line[:110], flush=True)
 
     print("--- removing earlier nat rules ---", flush=True)
     xsh.docker_exec(name, CLEANUP, echo=True)
