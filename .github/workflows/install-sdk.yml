@@ -1,0 +1,143 @@
+name: install-sdk
+
+# Install the Windows SDK, MSVC build tools and the .NET SDK, entirely over SSH.
+#
+# WHY THIS IS A THIRD STAGE AND NOT PART OF THE OTHERS.
+#
+#   bake-golden       produces a clean Windows disk. Nothing is installed into it.
+#   install-openssh   boots that disk, adds sshd, and proves a login works.
+#   install-sdk       this one. sshd already exists, so everything happens over SSH.
+#
+# Keeping them separate is why a failure here costs minutes: no install, no OCR, no typing,
+# no 900-second boot. It starts from the disk the previous stage exported.
+#
+# WHAT IT PROVES. A winget exit code says an installer ran. The last step here compiles and
+# runs a C program with cl.exe, and prints dotnet --version - because "the SDK installed"
+# and "the toolchain works" are different claims.
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_run:
+        description: "Run id holding the disk with sshd installed"
+        required: true
+        default: "41007310155"
+      artifact_name:
+        description: "Artifact name holding that disk"
+        required: false
+        default: "golden-windows-openssh"
+      port:
+        description: "sshd port"
+        required: false
+        default: "2222"
+      boot_wait:
+        description: "Seconds to wait for the desktop"
+        required: false
+        default: "1800"
+      export_disk:
+        description: "Export the finished disk as a new artifact"
+        required: false
+        default: "yes"
+
+permissions:
+  contents: read
+  actions: read
+  checks: write
+
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    # BuildTools with a workload is the slow part; two hours covers a fresh machine.
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-utils tesseract-ocr sshpass
+          sshpass -V | head -1
+
+      - name: parser selftest
+        run: |
+          python3 scripts/openssh_setup.py selftest
+          python3 scripts/sdk_install.py --selftest
+
+      - name: free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af || true
+          df -h / | tail -1
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.inputs.artifact_name }}
+          path: artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.inputs.artifact_run }}
+
+      - name: place the disk
+        run: python3 scripts/openssh_setup.py disk
+
+      - name: boot and wait for the desktop
+        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: sdk-boot
+          interval: "20"
+          command: >-
+            python3 scripts/openssh_setup.py boot
+            --container sdkdisk --port ${{ github.event.inputs.port }}
+            --wait ${{ github.event.inputs.boot_wait }}
+
+      - name: expose the port
+        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: sdk-forward
+          interval: "15"
+          command: >-
+            python3 scripts/openssh_setup.py forward
+            --container sdkdisk --port ${{ github.event.inputs.port }}
+
+      # Runs even if the forward step failed: if ssh is reachable at all, the diagnosis of
+      # "is it the port or the login" is cheaper than another run.
+      - name: install the toolchain over ssh
+        if: always()
+        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: sdk-install
+          interval: "25"
+          command: >-
+            python3 scripts/sdk_install.py
+            --port ${{ github.event.inputs.port }}
+            --user docker --password admin
+
+      - name: export the disk
+        if: always() && github.event.inputs.export_disk == 'yes'
+        run: python3 scripts/openssh_setup.py export --container sdkdisk
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sdk-shots
+          path: shots/**
+          if-no-files-found: warn
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event.inputs.export_disk == 'yes'
+        with:
+          name: golden-windows-sdk
+          path: |
+            out/windows-openssh.qcow2
+            out/windows-openssh.qcow2.bootstate.tar.gz
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
+
+      - name: stop
+        if: always()
+        run: docker rm -f sdkdisk || true
