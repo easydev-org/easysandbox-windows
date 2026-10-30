@@ -26,7 +26,26 @@ name: ci
 on:
   push:
     branches: [main]
+    # NOT every commit. This builds and pushes the full sandbox image, which takes a runner
+    # for half an hour; the pipeline workflows under .github/workflows that drive bake ->
+    # ssh -> sdk do not need it, and while it ran it competed for the same concurrency budget
+    # - two install-sdk runs sat at 'job in_progress, steps: 0' for forty-five minutes.
+    paths:
+      - "Containerfile"
+      - "sandbox.sh"
+      - "golden-disk.sh"
+      - "guest/**"
+      - "vendor/**"
+      - "disk-support/**"
+      - ".github/workflows/ci.yml"
+      - "scripts/ghcr_pull_disk.py"
+      - "scripts/screen-read.py"
   pull_request:
+    paths:
+      - "Containerfile"
+      - "sandbox.sh"
+      - "guest/**"
+      - ".github/workflows/ci.yml"
   workflow_dispatch:
 
 permissions:

@@ -47,6 +47,13 @@ permissions:
   # attempt, which failed on layer 1/12 after the disk itself had been built successfully.
   packages: write
 
+# ONE AT A TIME. Each run costs a disk download plus a toolchain install, and a stale run
+# that is still booting a VM has nothing to contribute once a newer one exists - cancelling
+# it frees the runner instead of queueing behind it.
+concurrency:
+  group: install-sdk
+  cancel-in-progress: true
+
 jobs:
   install:
     runs-on: ubuntu-latest
