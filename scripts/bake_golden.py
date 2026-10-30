@@ -279,6 +279,27 @@ def stage_wait(cfg):
     except Exception as exc:
         log("could not capture a final frame: %s" % exc)
 
+    # RECORD THE DISK PATH WHILE THE CONTAINER IS STILL RUNNING.
+    #
+    # docker exec cannot enter a stopped container, and this stage stops it on the next
+    # line. extract therefore cannot rediscover the file - it has to be told. The name is
+    # not worth guessing either: a host-side find once came up empty on a run whose disk
+    # was plainly 18 GiB.
+    try:
+        cmdline = xsh.run(
+            ["docker", "exec", cfg.name, "sh", "-c",
+             "for p in $(pgrep -f qemu-system); do tr '\\0' '\\n' < /proc/$p/cmdline; done"],
+            echo=False).out or ""
+        disk = parse_disk_path(cmdline)
+        if disk:
+            with open(os.path.join(cfg.storage, ".disk-path"), "w") as f:
+                f.write(disk + "\n")
+            log("recorded disk path: %s" % disk)
+        else:
+            log("could not read the disk path from QEMU argv")
+    except Exception as exc:
+        log("could not record the disk path: %s" % exc)
+
     log("stopping the guest")
     # docker stop sends ACPI shutdown; dockur's finish() then runs markWindowsBooted and
     # writes the marker. Windows takes a while to shut down, hence the long timeout.
@@ -307,7 +328,17 @@ def stage_extract(cfg):
     # FIND THE DISK FROM QEMU'S OWN ARGV. A host-side find once came up empty on a run whose
     # disk was plainly 18 GiB, because the name is not one of the obvious few.
     inner = cfg.disk_path
+    # The path was recorded by the wait stage while the container was still running,
+    # because docker exec cannot enter a stopped container and this stage stops it here.
     if not inner:
+        try:
+            with open(os.path.join(cfg.storage, ".disk-path")) as f:
+                inner = f.read().strip().splitlines()[0]
+            log("disk path from the wait stage: %s" % inner)
+        except Exception:
+            inner = None
+    if not inner:
+        # Last try: this stage may be used on its own, with the container still up.
         cmdline = xsh.run(
             ["docker", "exec", cfg.name, "sh", "-c",
              "for p in $(pgrep -f qemu-system); do tr '\\0' '\\n' < /proc/$p/cmdline; done"],
