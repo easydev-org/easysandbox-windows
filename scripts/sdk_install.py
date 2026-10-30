@@ -47,8 +47,13 @@ PACKAGES = [
     # argument. winget's own --add does not exist - it printed its help and exited 2 both
     # times, with and without --override - so the installer switches go where the manifest
     # says they go: InstallerSwitches.Custom, which winget surfaces as --custom.
+    # The switch string is the one microsoft/winget-pkgs documents for this package:
+    #   winget install Microsoft.VisualStudio.2022.BuildTools --override
+    #     "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+    # --nocache was in the first version and the VS installer rejected it with exit 87
+    # (ERROR_INVALID_PARAMETER) - it is not one of its switches.
     ("Microsoft.VisualStudio.2022.BuildTools",
-     "--quiet --wait --norestart --nocache "
+     "--quiet --wait --norestart "
      "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended",
      "MSVC, the Windows SDK and CMake; a bare install has no cl.exe"),
     ("Microsoft.WindowsSDK.10.0.26100", None, "the SDK on its own"),
