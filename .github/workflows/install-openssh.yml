@@ -387,35 +387,30 @@ jobs:
           name: openssh-forward
           interval: "15"
           command: PORT=${{ github.event.inputs.port }} NAME=sshinst bash scripts/openssh-forward.sh
-
-      - name: read an ssh banner from the host
+      # ONE STEP, IN PYTHON, with the three stages reported separately.
+      #
+      # This replaces two shell steps that between them produced four wrong verdicts - a
+      # false green when the command was echoed into an ssh warning, and three false reds:
+      # rejecting "SSH-OK; whoami; hostname" (cmd.exe does not treat ";" as a separator),
+      # rejecting "win-host\docker" (that is how whoami prints), and a glob with an
+      # escaped backslash that could never match.
+      #
+      # scripts/openssh_verify.py does the same work with the parsing in Python, and
+      # `--selftest` replays those exact log strings offline. The check can now be
+      # checked before it is trusted, which is what all the shell versions lacked.
+      - name: verify ssh end to end
+        if: always()
         uses: easydev-org/easyagent-github-ext/actions/log-stream@main
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           name: openssh-verify
           interval: "15"
-          command: PORT=${{ github.event.inputs.port }} NAME=sshinst bash scripts/openssh-verify.sh
+          command: >-
+            python3 scripts/openssh_verify.py
+            --port ${{ github.event.inputs.port }}
+            --user docker --password admin
+            --attempts 6 --wait 30
 
-      # THE REAL TEST, and the one that should have been here from the start.
-      #
-      # Everything above reads a banner: it can only show that something on the port spoke
-      # SSH first. It cannot show that the account exists, that password authentication is
-      # on, that the shell starts or that the session survives - and it reports all of
-      # those failures as the same 'no banner', which is how several rounds were spent
-      # adjusting a binding that was never the problem.
-      #
-      # sshpass logs in. If it fails it says why, in words that name the cause.
-      - name: log in over ssh
-        # ALWAYS. The banner probe above can time out on a slow-but-working port, and when
-        # it failed this step was skipped - so the one check that would have proved the
-        # login worked never ran. It must not depend on a weaker check succeeding.
-        if: always()
-        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          name: openssh-login
-          interval: "15"
-          command: PORT=${{ github.event.inputs.port }} bash scripts/ssh-login-test.sh
 
       - name: keep the final frame
         if: always()
