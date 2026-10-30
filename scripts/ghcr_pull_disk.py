@@ -65,8 +65,24 @@ def get(url, tok, accept=None):
 
 
 def main():
-    which, out = sys.argv[1], sys.argv[2]
-    repo, tag = PLAN[which]
+    # Two forms, because two callers exist:
+    #   ghcr_pull_disk.py windows out.qcow2                  a name from PLAN
+    #   ghcr_pull_disk.py golden-disk-windows dev out.qcow2  an explicit repo and tag
+    #
+    # The second form is what the pipeline stages use: they publish under several tags of one
+    # repository (base, openssh, dev), and a PLAN entry per tag would be a list to keep in step
+    # with the workflows by hand.
+    if len(sys.argv) >= 4:
+        which, tag, out = sys.argv[1], sys.argv[2], sys.argv[3]
+        repo = which
+    elif len(sys.argv) == 3:
+        which, out = sys.argv[1], sys.argv[2]
+        if which not in PLAN:
+            sys.exit("unknown disk %r; known: %s - or pass <repo> <tag> <out>" %
+                     (which, ", ".join(sorted(PLAN))))
+        repo, tag = PLAN[which]
+    else:
+        sys.exit("usage: ghcr_pull_disk.py <name|repo> [tag] <out.qcow2>")
     pat = os.environ.get("GHCR_TOKEN")
     if not pat:
         sys.exit("set GHCR_TOKEN (PAT with read:packages)")
