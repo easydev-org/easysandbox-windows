@@ -29,10 +29,14 @@ name: install-openssh
 on:
   workflow_dispatch:
     inputs:
-      artifact_run:
-        description: "Run id holding the golden-windows artifact"
-        required: true
-        default: "40746509253"
+      pull_tag:
+        description: "ghcr tag under easysandbox-windows-golden to start from"
+        required: false
+        default: "base-latest"
+      bootstate_run:
+        description: "Run id holding the bootstate artifact (optional)"
+        required: false
+        default: ""
       boot_wait:
         description: "Seconds to wait for the guest's desktop"
         required: false
@@ -83,16 +87,26 @@ jobs:
           sudo docker image prune -af || true
           df -h / | tail -1
 
+      # The disk comes from ghcr. A baked disk is 12 GiB and handing that between workflows
+      # as an artifact was measured at over 1000 seconds without finishing; from the registry
+      # it takes about 270.
       - uses: actions/download-artifact@v4
+        if: ${{ github.event.inputs.bootstate_run != '' }}
+        continue-on-error: true
         with:
-          name: golden-windows
+          name: golden-windows-bootstate
           path: artifact
           github-token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
-          run-id: ${{ github.event.inputs.artifact_run }}
+          run-id: ${{ github.event.inputs.bootstate_run }}
 
       - name: place the disk
-        run: python3 scripts/openssh_setup.py disk
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python3 scripts/openssh_setup.py place
+          --pull-repo easysandbox-windows-golden
+          --pull-tag ${{ github.event.inputs.pull_tag }}
 
       - name: boot and wait for the desktop
         uses: easydev-org/easyagent-github-ext/actions/log-stream@main

@@ -161,16 +161,14 @@ jobs:
           path: screenshots/**
           if-no-files-found: warn
           retention-days: 7
+      # BOOTSTATE ONLY. The disk itself goes to ghcr - 12 GiB through an Actions artifact
+      # was measured at over 1000 seconds and is the reason this pipeline moved to the
+      # registry at all. The bootstate is a few hundred KB and useless without the disk, so
+      # it travels here and the two are pulled from wherever each is cheap.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: golden-windows
-          # The disk AND the state files that make it bootable. windows.vars holds
-          # the UEFI boot entry; without it the firmware starts the installation
-          # DVD instead of the installed system.
-          path: |
-            ${{ github.workspace }}/out/windows.qcow2
-            ${{ github.workspace }}/out/windows.qcow2.bootstate.tar.gz
+          name: golden-windows-bootstate
+          path: ${{ github.workspace }}/out/*.bootstate.tar.gz
           if-no-files-found: warn
-          retention-days: 7
-          compression-level: 0
+          retention-days: 30
