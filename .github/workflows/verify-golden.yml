@@ -1,56 +1,68 @@
 name: verify-golden
 
-# Boot an already-baked Windows golden disk and photograph it.
+# Boot a disk a previous run exported, and prove it still works.
 #
-# WHY THIS EXISTS. Re-baking to answer "did it work?" costs twenty minutes and has
-# repeatedly thrown away a finished install over a defect in the checking code
-# rather than in the disk. The disk is the deliverable; the only question worth
-# asking of it afterwards is "does it come up?", and that is answerable by booting
-# it. Nothing here installs anything.
+# WHY THIS EXISTS. A bake, or an install-openssh run, ends by exporting a disk. Until this
+# workflow existed, nothing had ever booted one of those exports - the SSH login had only
+# been proven against the live VM that produced it. A disk that boots is the deliverable,
+# and "the machine that made it could log in" is not the same claim.
 #
-# MANUAL=Y is what makes dockur use the disk as-is: with it, install.sh returns
-# early instead of looking for an ISO and re-running Setup over the top.
-
+# Two mistakes that wasted the most rounds are deliberately not repeated here:
+#
+#   MANUAL=Y is NOT used. It forces Secure Boot on for win11, and a disk installed without
+#   Secure Boot is refused by the firmware, which falls through to the DVD - showing a
+#   Windows Setup screen that looks exactly like a broken disk. That misdiagnosis cost
+#   several runs. storage/windows.boot is what tells dockur the disk is installed.
+#
+#   The disk is converted to RAW first. dockur opens /storage/data.img with format=raw, so
+#   handing it qcow2 makes QEMU read metadata as a partition table, find no disk, and boot
+#   the ISO instead - again indistinguishable from a broken disk at the screen.
 on:
   workflow_dispatch:
     inputs:
       artifact_run:
-        description: "Run id that holds the golden-windows artifact"
+        description: "Run id holding the disk artifact"
         required: true
-        default: "40665204706"
+        default: "41007310155"
       artifact_name:
         description: "Artifact name holding the disk"
         required: false
-        default: "golden-windows"
-      wait_first:
-        description: "Seconds to let the guest run before the first screenshot"
+        default: "golden-windows-openssh"
+      port:
+        description: "sshd port to reach"
         required: false
-        default: "300"
-      wait_second:
-        description: "Seconds between the first and second screenshot"
+        default: "2222"
+      boot_wait:
+        description: "Seconds to wait for the desktop"
         required: false
-        default: "300"
+        default: "1800"
+      expect_login:
+        description: "yes = require an SSH login (disk has sshd); no = desktop only"
+        required: false
+        default: "yes"
 
 permissions:
   contents: read
   actions: read
+  checks: write
 
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
       - name: tooling
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-utils
-          qemu-img --version | head -1
+          sudo apt-get install -y -qq qemu-utils tesseract-ocr sshpass
+
+      - name: parser selftest
+        run: python3 scripts/openssh_setup.py selftest
 
       - name: free disk space
         run: |
-          set -x
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
                       /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" /opt/hostedtoolcache/CodeQL || true
           sudo docker image prune -af || true
@@ -64,228 +76,51 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ github.event.inputs.artifact_run }}
 
-      - name: place the disk where dockur expects it
-        run: |
-          set -eux
-          disk=$(find artifact -type f -size +1G | head -1)
-          [ -n "$disk" ] || { echo "no large disk in the artifact"; find artifact | head; exit 1; }
-          ls -la "$disk"
+      - name: place the disk
+        run: python3 scripts/openssh_setup.py disk
 
-          # /storage/data.img - NOT /storage/<version>/data.img.
-          #
-          # This is where the previous run went wrong, and it invalidated the whole
-          # check: the disk was placed at storage/11/data.img, dockur looked for
-          # storage/data.img, found nothing, and booted its installation ISO against
-          # an empty disk. Windows Setup then sat on "Select language settings",
-          # which is exactly what a fresh install looks like - and I read that as
-          # proof the golden disk was broken.
-          #
-          # Confirmed from the bake's own QEMU arguments:
-          #   -drive file=/storage/data.img,id=data3,...
-          #
-          # AND IT MUST BE RAW. dockur passes the disk to QEMU as
-          #   -drive file=/storage/data.img,...,format=raw
-          # because it creates that file itself ("Creating a 64 GB growable disk
-          # image in raw format"). The bake's extract step then converts it to qcow2
-          # for the artifact, so copying that qcow2 straight back here meant QEMU
-          # read qcow2 metadata as if it were a partition table, found no disk, and
-          # fell back to booting the installation ISO - which is exactly the
-          # "Select language settings" screen that looked like a broken golden disk.
-          #
-          # virt-ls read the same file correctly because it honours the format, so
-          # the disk itself was always fine. Converting back to raw is what makes
-          # QEMU see it.
-          mkdir -p storage
-          qemu-img convert -O raw "$disk" storage/data.img
-          sudo chmod a+r storage/data.img
+      - name: boot and wait for the desktop
+        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: verify-boot
+          interval: "20"
+          command: >-
+            python3 scripts/openssh_setup.py boot
+            --container verifydisk --port ${{ github.event.inputs.port }}
+            --wait ${{ github.event.inputs.boot_wait }}
 
-          # Restore the state that travels with the disk. windows.vars carries the
-          # UEFI boot entry (Boot0005 "Windows Boot Manager") - without it the
-          # firmware has nothing to boot, falls through to the next device and
-          # starts the installation DVD, which looks identical to an unfinished
-          # install. windows.ver is what MANUAL=Y reads to decide the boot mode;
-          # missing it makes dockur assume plain win11 and switch Secure Boot on,
-          # which an install made without Secure Boot will not boot under.
-          state=$(find artifact -name '*.bootstate.tar.gz' | head -1)
-          if [ -n "$state" ]; then
-            echo "restoring boot state from $state"
-            tar xzf "$state" -C storage
-            ls -la storage/
-          else
-            echo "WARNING: no bootstate archive in the artifact - the disk may not boot"
-            echo "         (it needs windows.vars for the UEFI boot entry)"
-          fi
-
-          # Tell dockur the installation is finished, instead of telling it to run
-          # in MANUAL mode.
-          #
-          # This is the difference that matters. MANUAL=Y reaches this branch in
-          # install.sh:
-          #
-          #   if (enabled "$aborted" || enabled "$MANUAL"); then
-          #       if (DETECTED == "win11"*) { BOOT_MODE = "windows_secure"; }
-          #
-          # which turns Secure Boot on unconditionally - the log line is "Booting
-          # Windows securely". The disk was installed without Secure Boot, so the
-          # firmware refuses its boot entry and falls through to the DVD.
-          #
-          # The completion marker avoids that branch entirely: hasCompletedInstall()
-          # is (hasSystemImage) or (hasData && hasBootMarker), and markWindowsBooted
-          # writes the marker with plain `touch`. With it present dockur treats the
-          # disk as an installed system and just starts it, on the same firmware
-          # settings it was installed with.
-          touch storage/windows.boot
-          echo "created completion marker: $(ls -la storage/boot)"
-
-          ls -la storage/
-          qemu-img info storage/data.img || true
-
-      # Read the disk before booting it. Whether Windows finished installing is
-      # recorded in the filesystem: a completed install has a large Windows
-      # directory, a setup-in-progress one has a small one plus
-      # \$WINDOWS.~BT / \$WINDOWS.~WS staging trees. That distinction is what the
-      # screenshots alone could not settle, because a Setup screen looks the same
-      # whether the files behind it are complete or not.
-      - name: inspect the disk contents
-        run: |
-          set -x
-          sudo apt-get install -y -qq libguestfs-tools >/dev/null 2>&1 || true
-          # virt-filesystems/virt-ls read the qcow2 without booting anything.
-          if command -v virt-ls >/dev/null 2>&1; then
-            sudo virt-filesystems -a storage/data.img --all --long -h || true
-            echo "=== top level of the 63G Windows volume (sda3) ==="
-            # sda3 is the system volume; sda4 is the 784 MB WinRE partition and
-            # only ever contains Recovery. The first version of this step listed
-            # sda4 and `||`'d over to sda3, so sda3 was never read when sda4
-            # succeeded - and "only Recovery" was then reported as "the disk is
-            # empty", which was wrong.
-            sudo virt-ls -a storage/data.img -m /dev/sda3 / 2>/dev/null | head -40 || true
-            echo "=== does the system volume look installed? ==="
-            sudo virt-ls -a storage/data.img -m /dev/sda3 / 2>/dev/null \
-              | grep -E 'Windows|Users|Program Files|WINDOWS\.~' || echo "   (no Windows/Users/Program Files)"
-            echo "=== user profiles ==="
-            sudo virt-ls -a storage/data.img -m /dev/sda3 /Users 2>/dev/null | head -20 || true
-          else
-            echo "virt-ls unavailable; falling back to qemu-nbd"
-            sudo modprobe nbd max_part=16 || true
-            sudo qemu-nbd -c /dev/nbd0 storage/data.img || true
-            sleep 3
-            lsblk /dev/nbd0 || true
-            sudo partx -a /dev/nbd0 2>/dev/null || true
-            sudo blkid /dev/nbd0p* 2>/dev/null || true
-            for p in /dev/nbd0p4 /dev/nbd0p3; do
-              if [ -b "$p" ]; then
-                sudo mkdir -p /mnt/win
-                if sudo mount -o ro "$p" /mnt/win 2>/dev/null; then
-                  echo "=== $p mounted ==="
-                  sudo ls -la /mnt/win | head -30 || true
-                  sudo umount /mnt/win || true
-                  break
-                fi
-              fi
-            done
-            sudo qemu-nbd -d /dev/nbd0 || true
-          fi
-
-      - name: boot it
-        run: |
-          set -x
-          # NO MANUAL=Y. The completion marker in storage/boot is what tells dockur
-          # the installation is finished; MANUAL would instead force Secure Boot on
-          # (install.sh sets BOOT_MODE=windows_secure for win11 under MANUAL), and
-          # this disk was installed without it.
-          # NET_ADMIN gives a real bridge instead of the passt fallback, and
-          # /dev/net/tun is what the bridge needs.
-          docker run -d --name winverify \
-            --device=/dev/kvm --device=/dev/net/tun --cap-add NET_ADMIN \
-            -e VERSION=11 -e DISK_SIZE=64G -e RAM_SIZE=8G -e CPU_CORES=4 \
-            -p 2222:2222 -p 8006:8006 \
-            --stop-timeout 120 \
-            -v "$GITHUB_WORKSPACE/storage:/storage" \
-            dockurr/windows
-          sleep 30
-          docker ps -a
-          docker logs --tail 60 winverify || true
-
-      - name: first look
-        run: |
-          set -x
-          sleep "${{ github.event.inputs.wait_first }}"
-          docker ps -a
-          echo "=== container log ==="
-          docker logs --tail 100 winverify || true
-          docker cp scripts/shotsock.py winverify:/tmp/shotsock.py
-          # /run/shm is where dockur's QEMU monitor socket lives; the macOS verify
-          # workflow uses the same path.
-          docker exec winverify python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/shot.ppm 2>&1 | tail -5 || true
-          docker cp winverify:/tmp/shot.ppm ./screen.ppm 2>/dev/null || true
-          if [ -s screen.ppm ]; then python3 scripts/ppm2png.py screen.ppm screen.png || true; fi
-          ls -la screen.* 2>/dev/null || echo "no screenshot"
-
-      # The first screenshot showed Windows Setup sitting on "Select language
-      # settings" - so the disk is not installed, and the answer file did not take
-      # effect. This step presses Next to find out which it is: if Setup continues,
-      # the disk holds a half-done install whose answer file was ignored; if the
-      # screen does not move, the image is not bootable at all.
-      #
-      # The key is sent through QEMU's own monitor, the same channel as the
-      # screenshot, because the container has no other way to touch the guest's
-      # keyboard.
-      - name: press Next and look again
+      - name: expose the port
         if: always()
-        run: |
-          set -x
-          if ! docker ps --format "{{.Names}}" | grep -qx winverify; then
-            echo "container is not running; nothing to press"; exit 0
-          fi
-          docker exec winverify python3 - <<'PY' 2>&1 | tail -8 || true
-          import socket, time
-          path = "/run/shm/monitor.sock"
-          s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-          s.settimeout(15); s.connect(path); time.sleep(0.5)
-          try: s.recv(8192)
-          except Exception: pass
-          # HMP: "sendkey ret" is Enter. Tab then Enter would be safer on a page
-          # whose default button is already Next, but Enter acts on the default.
-          for cmd in ["sendkey ret"]:
-              s.sendall((cmd + "\n").encode()); time.sleep(1)
-          s.close()
-          print("sent Enter")
-          PY
-          sleep 20
-          docker exec winverify python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/shot3.ppm 2>&1 | tail -3 || true
-          docker cp winverify:/tmp/shot3.ppm ./screen3.ppm 2>/dev/null || true
-          if [ -s screen3.ppm ]; then python3 scripts/ppm2png.py screen3.ppm screen3.png || true; fi
-          ls -la screen3.* 2>/dev/null || true
+        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: verify-forward
+          interval: "15"
+          command: >-
+            python3 scripts/openssh_setup.py forward
+            --container verifydisk --port ${{ github.event.inputs.port }}
 
-      - name: second look
-        if: always()
-        run: |
-          set -x
-          sleep "${{ github.event.inputs.wait_second }}"
-          docker cp scripts/shotsock.py winverify:/tmp/shotsock.py 2>/dev/null || true
-          docker exec winverify python3 /tmp/shotsock.py /run/shm/monitor.sock /tmp/shot2.ppm 2>&1 | tail -5 || true
-          docker cp winverify:/tmp/shot2.ppm ./screen2.ppm 2>/dev/null || true
-          if [ -s screen2.ppm ]; then python3 scripts/ppm2png.py screen2.ppm screen2.png || true; fi
-          ls -la screen2.* 2>/dev/null || true
-          echo "=== final container state ==="
-          docker ps -a
-          docker logs --tail 40 winverify || true
+      - name: prove ssh works from this host
+        if: always() && github.event.inputs.expect_login == 'yes'
+        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: verify-ssh
+          interval: "15"
+          command: >-
+            python3 scripts/openssh_setup.py verify
+            --port ${{ github.event.inputs.port }}
+            --user docker --password admin --attempts 6
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: verify-screenshots
-          path: |
-            screen.png
-            screen.ppm
-            screen2.png
-            screen2.ppm
-            screen3.png
-            screen3.ppm
+          name: verify-shots
+          path: shots/**
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 7
 
       - name: stop
         if: always()
-        run: docker rm -f winverify || true
+        run: docker rm -f verifydisk || true
