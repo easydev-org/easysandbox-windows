@@ -43,8 +43,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PACKAGES = [
     # No --override. winget rejected the combination and printed help (exit 2). The
     # workload is passed the way winget documents for this package instead.
+    # The workload has to reach the Visual Studio installer, which takes it as a custom
+    # argument. winget's own --add does not exist - it printed its help and exited 2 both
+    # times, with and without --override - so the installer switches go where the manifest
+    # says they go: InstallerSwitches.Custom, which winget surfaces as --custom.
     ("Microsoft.VisualStudio.2022.BuildTools",
-     ["--add", "Microsoft.VisualStudio.Workload.VCTools", "--includeRecommended"],
+     "--quiet --wait --norestart --nocache "
+     "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended",
      "MSVC, the Windows SDK and CMake; a bare install has no cl.exe"),
     ("Microsoft.WindowsSDK.10.0.26100", None, "the SDK on its own"),
     ("Microsoft.DotNet.SDK.10", None, "the .NET SDK, which VCTools does not include"),
@@ -97,11 +102,16 @@ def stage_check_tools(port, user, password):
     #     Failed in attempting to update the source: winget      exit 255
     # which reads like a winget problem rather than a network one.
     print("--- can the guest reach the internet ---", flush=True)
-    r = ssh_run(port, user, password, 'curl -s -o NUL -w "%{http_code}" --max-time 20 https://cdn.winget.microsoft.com/cache', timeout=120)
-    code = ((r.out or "") + (r.err or "")).strip().splitlines()
-    print("  https://cdn.winget.microsoft.com  -> %s" % (code[-1][:60] if code else "(no output)"), flush=True)
+    # PowerShell own test, because curl through ssh gave 'Connection closed by remote
+    # host' - the SSH session dropping, not curl answering, so it said nothing about the
+    # network. Test-NetConnection reports whether a TCP handshake completed.
+    r = ssh_run(port, user, password,
+                "powershell -NoProfile -Command (Test-NetConnection cdn.winget.microsoft.com -Port 443).TcpTestSucceeded",
+                timeout=180)
+    out = ((r.out or "") + (r.err or "")).strip().splitlines()
+    print("  TCP 443 to cdn.winget.microsoft.com -> %s" % (out[-1][:40] if out else "(no output)"), flush=True)
     r = ssh_run(port, user, password, "nslookup cdn.winget.microsoft.com", timeout=120)
-    for line in ((r.out or "") + (r.err or "")).strip().splitlines()[-4:]:
+    for line in ((r.out or "") + (r.err or "")).strip().splitlines()[-3:]:
         print("  dns: " + line[:90], flush=True)
 
     print("--- winget over ssh, and what is installed ---", flush=True)
@@ -127,8 +137,11 @@ def stage_install(port, user, password):
         parts = ["winget", "install", "--id", pid, "--exact", "--source", "winget",
                  "--accept-source-agreements", "--accept-package-agreements",
                  "--disable-interactivity"]
+        # A package that needs installer switches gets --custom with the whole switch string
+        # as one argument. Not --override, which replaces winget's own switches and cannot be
+        # combined with the accept flags.
         if extra:
-            parts += extra
+            parts += ["--custom", '"' + extra + '"']
         cmd = " ".join(parts)
         print("  running: %s" % cmd, flush=True)
         # BuildTools with a workload is slow; ten minutes is ordinary on a fresh machine.
