@@ -58,7 +58,7 @@ for i in $(seq 1 "$ATTEMPTS"); do
   # standard, and matching only 'docker' rejected every successful login. Accept the
   # name as the last path component.
   case "$second" in
-    "$USER_NAME"|"*\$USER_NAME") second_ok=1 ;;
+    "$USER_NAME"|"*\\$USER_NAME") second_ok=1 ;;
     *) second_ok=0 ;;
   esac
   if [ "$first" = "SSH-OK" ] && [ "$second_ok" = "1" ] && [ -n "$host" ]; then
