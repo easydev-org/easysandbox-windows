@@ -30,6 +30,62 @@ import xsh
 
 # ---------------------------------------------------------------- stages
 
+def stage_place(args):
+    """Fetch the golden disk from ghcr and convert it to the raw image QEMU opens.
+
+    The counterpart to publish. ghcr_pull_disk.py rebuilds the qcow2 from the OCI layers and
+    checks it against disk.sha256 from the manifest, so a transport fault shows up as a
+    checksum mismatch rather than as a Windows that will not boot.
+
+    Bootstate comes from the same run artifact as before - a few hundred KB, useless without
+    the disk, and not worth a second registry round trip.
+    """
+    os.makedirs("storage", exist_ok=True)
+    repo = args.pull_repo or "golden-disk-windows"
+    tag = args.pull_tag or "base"
+    print("--- pulling ghcr.io/easydev-org/%s:%s ---" % (repo, tag), flush=True)
+
+    env = dict(os.environ)
+    xsh.need(env.get("GHCR_TOKEN"), "GHCR_TOKEN is not set (needs read:packages)")
+    local = "pulled.qcow2"
+    r = xsh.run([sys.executable,
+                 os.path.join(os.path.dirname(os.path.abspath(__file__)), "ghcr_pull_disk.py"),
+                 repo, tag, local], echo=True)
+    xsh.need(r.ok, "could not pull %s:%s" % (repo, tag))
+    xsh.need(os.path.exists(local), "pull reported success but produced no file")
+    print("  pulled: %.1f MiB" % (os.path.getsize(local) / 2 ** 20), flush=True)
+
+    # From here it is identical to the artifact path: convert to raw and check it.
+    free_kb = int(xsh.run(["df", "--output=avail", "-k", "."], echo=False).out.split()[-1])
+    xsh.need(free_kb > 64 * 1024 * 1024, "not enough free space for a 64 GiB raw image")
+    xsh.run(["qemu-img", "convert", "-O", "raw", local, "storage/data.img"], check=True)
+    os.unlink(local)
+    size = os.path.getsize("storage/data.img")
+    print("  converted: %d bytes" % size, flush=True)
+    xsh.need(size == 68719476736,
+             "conversion incomplete: expected 68719476736 bytes, got %d" % size)
+    nonzero = 0
+    with open("storage/data.img", "rb") as f:
+        for off in (0, 512, 1 << 20, size // 4, size // 2, size * 3 // 4):
+            f.seek(off)
+            if any(f.read(4096)):
+                nonzero += 1
+    print("  non-zero sample points: %d/6" % nonzero, flush=True)
+    xsh.need(nonzero >= 2, "the converted image looks empty")
+
+    state = xsh.run(["bash", "-c",
+                     "find artifact -name '*.bootstate.tar.gz' | head -1"], echo=False).out.strip()
+    if state:
+        xsh.run(["tar", "xzf", state, "-C", "storage"], check=True)
+        print("  restored bootstate: %s" % state, flush=True)
+    else:
+        print("  WARNING: no bootstate archive in the workspace", flush=True)
+
+    open("storage/windows.boot", "w").close()
+    print("  completion marker: storage/windows.boot", flush=True)
+    return 0
+
+
 def stage_disk(args):
     """Make storage/data.img from the artifact, and prove it is complete.
 
@@ -180,31 +236,97 @@ def stage_verify(args):
 
 
 def stage_export(args):
-    """Stop the guest and copy the disk plus the state files it needs to boot."""
+    """Stop the guest and take the disk out, as qcow2, with the state files it needs.
+
+    The output name is a parameter because three stages export: install-openssh makes the
+    disk with sshd, install-sdk makes the one with the toolchain, and a name that says which
+    is which is what keeps the artifacts from being confused later.
+    """
+    out_name = args.out_name or "windows.qcow2"
     xsh.run(["docker", "stop", "-t", "180", args.container], echo=True)
     os.makedirs("out", exist_ok=True)
     xsh.run(["docker", "cp", "%s:/storage/data.img" % args.container, "out/data.img"], check=True)
-    xsh.run(["qemu-img", "convert", "-O", "qcow2", "out/data.img", "out/windows-openssh.qcow2"],
+    xsh.run(["qemu-img", "convert", "-O", "qcow2", "out/data.img", "out/%s" % out_name],
             check=True)
     os.unlink("out/data.img")
+    collected = []
     for name in ("windows.vars", "windows.ver", "windows.base", "windows.mac", "windows.rom"):
         r = xsh.run(["docker", "cp", "%s:/storage/%s" % (args.container, name),
                      "out/%s" % name], echo=False)
-        if not r.ok:
+        if r.ok:
+            collected.append(name)
+        else:
             print("  missing %s" % name, flush=True)
-    xsh.run(["tar", "czf", "out/windows-openssh.qcow2.bootstate.tar.gz", "-C", "out",
-             "windows.vars", "windows.ver", "windows.base", "windows.mac", "windows.rom"],
-            echo=False)
+    if collected:
+        # Named after the disk so two exports in one workspace cannot overwrite each other.
+        xsh.run(["tar", "czf", "out/%s.bootstate.tar.gz" % out_name, "-C", "out"] + collected,
+                echo=False)
     for name in sorted(os.listdir("out")):
         print("  %s" % name, flush=True)
+    return 0
+
+
+def stage_publish(args):
+    """Push the exported disk to ghcr as an OCI artifact.
+
+    WHY GHCR AND NOT AN ACTIONS ARTIFACT. The artifact route was measured here: downloading
+    14040 MiB between workflows ran over 1000 seconds without finishing, which is the same
+    range dockur-macos recorded ("106 seconds to not finished after 1085"). The same file in
+    ghcr is fetched through a CDN, and - more to the point - that is where the sandbox images
+    already expect a golden disk to come from. This is the production path, not extra
+    machinery.
+
+    The disk is uploaded in 1 GiB layers by scripts/ghcr_push_disk.py, which also records
+    disk.sha256 in the manifest so a consumer verifies the reassembled file instead of
+    trusting the transport. That script was written for this organisation and already
+    publishes golden-disk-windows:base.
+    """
+    out_name = args.out_name or "windows.qcow2"
+    path = os.path.join("out", out_name)
+    xsh.need(os.path.exists(path), "no %s to publish - run export first" % path)
+    size = os.path.getsize(path)
+    print("  %s: %.1f MiB" % (path, size / 2 ** 20), flush=True)
+
+    target = args.publish_repo or "ghcr.io/easydev-org/golden-disk-windows"
+    tag = args.publish_tag or "base"
+    print("  -> %s:%s" % (target, tag), flush=True)
+    env = dict(os.environ)
+    xsh.need(env.get("GHCR_TOKEN"), "GHCR_TOKEN is not set (needs write:packages)")
+    env.setdefault("GHCR_USER", os.environ.get("GITHUB_ACTOR", "easydev-org"))
+
+    r = xsh.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                              "ghcr_push_disk.py"), path, target, tag],
+                echo=True)
+    xsh.need(r.ok, "push to %s:%s failed" % (target, tag))
+
+    # Read it back rather than trusting the push: the manifest is fetched and its layer
+    # count and sha256 annotation compared with what was just sent.
+    print("--- reading the manifest back ---", flush=True)
+    import json as _json
+    import urllib.request as _u
+    import base64 as _b64
+    owner, repo = target.replace("ghcr.io/", "").split("/", 1)
+    basic = _b64.b64encode(("x-access-token:" + env["GHCR_TOKEN"]).encode()).decode()
+    tok = _json.load(_u.urlopen(_u.Request(
+        "https://ghcr.io/token?scope=repository:%s:pull&service=ghcr.io" % repo,
+        headers={"Authorization": "Basic " + basic}), timeout=60))["token"]
+    accept = "application/vnd.oci.image.manifest.v1+json"
+    m = _json.load(_u.urlopen(_u.Request(
+        "https://ghcr.io/v2/%s/manifests/%s" % (repo, tag),
+        headers={"Authorization": "Bearer " + tok, "Accept": accept}), timeout=60))
+    print("  layers: %d" % len(m.get("layers", [])), flush=True)
+    ann = m.get("annotations") or {}
+    print("  disk.sha256: %s" % ann.get("disk.sha256", "(absent)"), flush=True)
+    xsh.need(ann.get("disk.sha256"), "the pushed manifest has no disk.sha256 annotation")
+    print("published: ghcr.io/%s:%s" % (repo, tag), flush=True)
     return 0
 
 
 def main(argv=None):
     argv = argv if argv is not None else sys.argv[1:]
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("stage", choices=["disk", "boot", "install", "forward", "verify",
-                                      "export", "selftest"])
+    ap.add_argument("stage", choices=["disk", "place", "boot", "install", "forward",
+                                      "verify", "export", "publish", "selftest"])
     ap.add_argument("--container", default="sshinst")
     ap.add_argument("--port", type=int, default=2222)
     ap.add_argument("--user", default="docker")
@@ -212,6 +334,12 @@ def main(argv=None):
     ap.add_argument("--wait", type=int, default=1800, help="boot: seconds to wait for desktop")
     ap.add_argument("--attempts", type=int, default=6)
     ap.add_argument("--shots", default="shots")
+    ap.add_argument("--out-name", default="windows.qcow2",
+                    help="export/publish: filename of the qcow2 in out/")
+    ap.add_argument("--publish-repo", default="ghcr.io/easydev-org/golden-disk-windows")
+    ap.add_argument("--publish-tag", default="base")
+    ap.add_argument("--pull-repo", default="golden-disk-windows")
+    ap.add_argument("--pull-tag", default="base")
     args = ap.parse_args(argv)
 
     if args.stage == "selftest":
@@ -221,11 +349,13 @@ def main(argv=None):
 
     return {
         "disk": stage_disk,
+        "place": stage_place,
         "boot": stage_boot,
         "install": stage_install,
         "forward": stage_forward,
         "verify": stage_verify,
         "export": stage_export,
+        "publish": stage_publish,
     }[args.stage](args)
 
 

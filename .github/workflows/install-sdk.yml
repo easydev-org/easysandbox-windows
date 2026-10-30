@@ -17,14 +17,14 @@ name: install-sdk
 on:
   workflow_dispatch:
     inputs:
-      artifact_run:
-        description: "Run id holding the disk with sshd installed"
-        required: true
-        default: "41007310155"
-      artifact_name:
-        description: "Artifact name holding that disk"
+      pull_tag:
+        description: "ghcr tag under golden-disk-windows holding the sshd disk"
         required: false
-        default: "golden-windows-openssh"
+        default: "openssh"
+      bootstate_run:
+        description: "Run id holding the bootstate artifact"
+        required: false
+        default: ""
       port:
         description: "sshd port"
         required: false
@@ -70,15 +70,22 @@ jobs:
           df -h / | tail -1
 
       - uses: actions/download-artifact@v4
+        if: ${{ github.event.inputs.bootstate_run != '' }}
+        continue-on-error: true
         with:
-          name: ${{ github.event.inputs.artifact_name }}
+          name: golden-windows-openssh-bootstate
           path: artifact
           github-token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
-          run-id: ${{ github.event.inputs.artifact_run }}
+          run-id: ${{ github.event.inputs.bootstate_run }}
 
       - name: place the disk
-        run: python3 scripts/openssh_setup.py disk
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python3 scripts/openssh_setup.py place
+          --pull-repo golden-disk-windows
+          --pull-tag ${{ github.event.inputs.pull_tag }}
 
       - name: boot and wait for the desktop
         uses: easydev-org/easyagent-github-ext/actions/log-stream@main
@@ -117,7 +124,22 @@ jobs:
 
       - name: export the disk
         if: always() && github.event.inputs.export_disk == 'yes'
-        run: python3 scripts/openssh_setup.py export --container sdkdisk
+        run: >-
+          python3 scripts/openssh_setup.py export
+          --container sdkdisk --out-name windows-dev.qcow2
+
+      # Same reason as install-openssh: 14 GiB between workflows is a CDN job, not an
+      # artifact job. Tag "dev" - this disk carries the developer toolchain.
+      - name: publish to ghcr
+        if: always() && github.event.inputs.export_disk == 'yes'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: >-
+          python3 scripts/openssh_setup.py publish
+          --out-name windows-dev.qcow2
+          --publish-repo ghcr.io/easydev-org/golden-disk-windows
+          --publish-tag dev
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -130,13 +152,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always() && github.event.inputs.export_disk == 'yes'
         with:
-          name: golden-windows-sdk
-          path: |
-            out/windows-openssh.qcow2
-            out/windows-openssh.qcow2.bootstate.tar.gz
+          name: golden-windows-dev-bootstate
+          path: out/*.bootstate.tar.gz
           if-no-files-found: warn
-          retention-days: 7
-          compression-level: 0
+          retention-days: 30
 
       - name: stop
         if: always()

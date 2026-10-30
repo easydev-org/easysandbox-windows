@@ -20,14 +20,14 @@ name: verify-golden
 on:
   workflow_dispatch:
     inputs:
-      artifact_run:
-        description: "Run id holding the disk artifact"
-        required: true
-        default: "41007310155"
-      artifact_name:
-        description: "Artifact name holding the disk"
+      pull_tag:
+        description: "ghcr tag under golden-disk-windows (base, openssh, dev)"
         required: false
-        default: "golden-windows-openssh"
+        default: "openssh"
+      bootstate_run:
+        description: "Run id holding the bootstate artifact (omit to skip)"
+        required: false
+        default: ""
       port:
         description: "sshd port to reach"
         required: false
@@ -68,16 +68,24 @@ jobs:
           sudo docker image prune -af || true
           df -h / | tail -1
 
+      # The disk comes from ghcr, the bootstate from the run artifact that published it.
       - uses: actions/download-artifact@v4
+        if: ${{ github.event.inputs.bootstate_run != '' }}
+        continue-on-error: true
         with:
-          name: ${{ github.event.inputs.artifact_name }}
+          name: golden-windows-openssh-bootstate
           path: artifact
           github-token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
-          run-id: ${{ github.event.inputs.artifact_run }}
+          run-id: ${{ github.event.inputs.bootstate_run }}
 
       - name: place the disk
-        run: python3 scripts/openssh_setup.py disk
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python3 scripts/openssh_setup.py place
+          --pull-repo golden-disk-windows
+          --pull-tag ${{ github.event.inputs.pull_tag }}
 
       - name: boot and wait for the desktop
         uses: easydev-org/easyagent-github-ext/actions/log-stream@main

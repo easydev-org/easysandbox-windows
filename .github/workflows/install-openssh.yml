@@ -137,7 +137,41 @@ jobs:
 
       - name: export the disk
         if: always() && github.event.inputs.export_disk == 'yes'
-        run: python3 scripts/openssh_setup.py export --container sshinst
+        run: >-
+          python3 scripts/openssh_setup.py export
+          --container sshinst --out-name windows-openssh.qcow2
+
+      # GHCR, NOT AN ACTIONS ARTIFACT, and the measurement is the reason.
+      #
+      # Handing a 14 GiB disk between workflows as an artifact took over 1000 seconds here
+      # without finishing; dockur-macos recorded the same file ranging from 106 seconds to
+      # "not finished after 1085". The artifact route redirects to Azure blob storage at a
+      # rate no workflow can influence. ghcr is a CDN, and it is where the sandbox images
+      # already expect a golden disk to come from - so this is the production path.
+      #
+      # The disk travels in 1 GiB layers with disk.sha256 in the manifest, so the consumer
+      # verifies the reassembled file instead of trusting the transport.
+      - name: publish to ghcr
+        if: always() && github.event.inputs.export_disk == 'yes'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: >-
+          python3 scripts/openssh_setup.py publish
+          --out-name windows-openssh.qcow2
+          --publish-repo ghcr.io/easydev-org/golden-disk-windows
+          --publish-tag openssh
+
+      # The BOOTSTATE still goes as an artifact: it is a few hundred KB, it is useless
+      # without the disk, and pulling two things from two places to boot one machine is
+      # worse than pulling one from each. The disk is the big half; this is the small half.
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event.inputs.export_disk == 'yes'
+        with:
+          name: golden-windows-openssh-bootstate
+          path: out/*.bootstate.tar.gz
+          if-no-files-found: warn
+          retention-days: 30
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -146,17 +180,6 @@ jobs:
           path: shots/**
           if-no-files-found: warn
           retention-days: 7
-
-      - uses: actions/upload-artifact@v4
-        if: always() && github.event.inputs.export_disk == 'yes'
-        with:
-          name: golden-windows-openssh
-          path: |
-            out/windows-openssh.qcow2
-            out/windows-openssh.qcow2.bootstate.tar.gz
-          if-no-files-found: warn
-          retention-days: 7
-          compression-level: 0
 
       - name: stop
         if: always()
