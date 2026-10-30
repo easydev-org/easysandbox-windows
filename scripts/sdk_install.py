@@ -52,10 +52,16 @@ PACKAGES = [
     #     "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
     # --nocache was in the first version and the VS installer rejected it with exit 87
     # (ERROR_INVALID_PARAMETER) - it is not one of its switches.
+    # NO --override AT ALL, and then a separate modify.
+    #
+    # exit 87 (ERROR_INVALID_PARAMETER) survived a batch file, so quoting was never the
+    # cause - and --override replaces the whole switch set winget passes to the installer,
+    # which is a large thing to replace to add one workload. So: install the package with
+    # winget's own switches (no overrides), then run the VS installer's modify verb with the
+    # workload, which is the supported way to add components to an existing BuildTools.
     ("Microsoft.VisualStudio.2022.BuildTools",
-     "--quiet --wait --norestart --accept-license "
-     "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended",
-     "MSVC, the Windows SDK and CMake; a bare install has no cl.exe"),
+     None,
+     "installed bare, then modified to add VCTools"),
     ("Microsoft.WindowsSDK.10.0.26100", None, "the SDK on its own"),
     ("Microsoft.DotNet.SDK.10", None, "the .NET SDK, which VCTools does not include"),
 ]
@@ -176,6 +182,27 @@ def stage_install(port, user, password):
         if r.code != 0:
             print("  NOTE: winget returned %d; the machine is asked directly below" % r.code,
                   flush=True)
+    # ADD THE WORKLOAD, on the installed BuildTools.
+    #
+    # The script is a file staged with scp, for the same reason the sshd setup is: it
+    # contains C:\Program Files (x86)\... with spaces and backslashes, and inline those
+    # pass through ssh -> cmd.exe -> powershell, where characters get lost.
+    print("=== adding the VCTools workload ===", flush=True)
+    script = os.path.join(HERE, "ps", "vs-workload.ps1")
+    remote = "C:/Users/%s/vs-workload.ps1" % user
+    r = xsh.run(["sshpass", "-p", password, "scp",
+                 "-o", "StrictHostKeyChecking=no",
+                 "-o", "UserKnownHostsFile=/dev/null",
+                 "-P", str(port), script, "%s@127.0.0.1:%s" % (user, remote)],
+                echo=False, timeout=300)
+    xsh.need(r.ok, "could not copy the workload script: %s" % (r.err or r.out))
+    r = ssh_run(port, user, password,
+                "powershell -NoProfile -ExecutionPolicy Bypass -File " + remote,
+                timeout=3600)
+    for line in ((r.out or "") + (r.err or "")).strip().splitlines()[-8:]:
+        print("  " + line[:140], flush=True)
+
+    return stage_verify(port, user, password)
     return stage_verify(port, user, password)
 
 
@@ -262,6 +289,29 @@ def selftest():
 
     # The PowerShell file must survive to disk with its Windows paths intact - a \\v or \\s
     # eaten as a python escape is exactly what broke the first attempt at building it.
+    # Both PowerShell files must reach disk with their Windows paths intact. A backslash-v
+    # or backslash-s eaten as a python escape is what broke the first attempt at writing
+    # them - the file said Installerswhere.exe instead of Installer + backslash + vswhere.
+    # The needle is built with chr(92) for the same reason: written as an escape in this
+    # source it would be eaten on the way into the file too.
+    bslash = chr(92)
+    for name, needles in [
+        ("msvc-check.ps1", ["Installer" + bslash + "vswhere.exe",
+                            "Build" + bslash + "vcvars64.bat", "hello-from-msvc"]),
+        ("vs-workload.ps1", ["Installer" + bslash + "vswhere.exe",
+                             "vs_installer.exe", "Workload.VCTools"]),
+    ]:
+        path = os.path.join(HERE, "ps", name)
+        if not os.path.exists(path):
+            print("  FAIL %s missing" % name)
+            bad += 1
+            continue
+        body = open(path).read()
+        for needle in needles:
+            got = needle in body
+            bad += not got
+            print("  %s %-18s %-26s -> %s" % ("ok " if got else "FAIL", name, needle[:26], got))
+
     script = os.path.join(HERE, "ps", "msvc-check.ps1")
     if os.path.exists(script):
         body = open(script).read()
