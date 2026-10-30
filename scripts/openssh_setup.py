@@ -120,28 +120,7 @@ def stage_boot(args):
     xsh.need(False, "no desktop within %ds (last stage %r)" % (args.wait, last))
 
 
-SSHD_CONFIG = r"""
-$ErrorActionPreference = 'Stop'
-Set-Service sshd -StartupType Automatic
-Stop-Service sshd -Force -ErrorAction SilentlyContinue
-(Get-Content C:\ProgramData\ssh\sshd_config) `
-  -replace '^#?\s*Port\s+.*', 'Port {port}' `
-  -replace '^#?\s*PasswordAuthentication\s+.*', 'PasswordAuthentication yes' |
-  Set-Content C:\ProgramData\ssh\sshd_config
-Start-Service sshd
-Start-Sleep 3
-Set-NetFirewallProfile -All -Enabled False
-New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH Server' -Enabled True `
-  -Direction Inbound -Protocol TCP -Action Allow -LocalPort {port} `
-  -ErrorAction SilentlyContinue | Out-Null
-Write-Output '--- service ---'
-Get-Service sshd | Select-Object Status,StartType | Format-List
-Write-Output '--- listening ---'
-Get-NetTCPConnection -State Listen -LocalPort {port} -ErrorAction SilentlyContinue |
-  Select-Object LocalAddress,LocalPort | Format-Table
-Write-Output '--- config ---'
-(Get-Content C:\ProgramData\ssh\sshd_config) -match '^(Port|PasswordAuthentication)'
-"""
+
 
 
 def stage_install(args):
@@ -176,7 +155,13 @@ def stage_install(args):
             break
 
     print("--- configuring sshd ---", flush=True)
-    g.powershell(SSHD_CONFIG.format(port=args.port), settle=15)
+    # The script is a file, not a string in this module: it is PowerShell, full of
+    # backslashes and regexes, and putting it here meant writing them through two layers
+    # of escaping (python string, then the guest keyboard).
+    with open("scripts/sshd_setup.ps1.txt") as f:
+        body = f.read().replace("__PORT__", str(args.port))
+    statements = [l for l in body.splitlines() if l.strip()]
+    g.run_script(statements, settle=20)
     g.screenshot("sshd")
     return 0
 

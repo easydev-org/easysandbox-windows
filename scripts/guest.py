@@ -119,7 +119,19 @@ class Guest:
         return local if os.path.getsize(local) > 0 else None
 
     def type_text(self, text, enter=False):
-        """Type text into the guest via HMP sendkey. No shell is involved anywhere."""
+        """Type text into the guest via HMP sendkey. No shell is involved anywhere.
+
+        NEWLINES ARE REJECTED, LOUDLY. A multiline PowerShell script was passed here once
+        and the key map failed on the newline after typing nothing - honest, but the
+        caller should not have sent it. Callers join statements with the separator the
+        target shell understands: ';' for PowerShell, '&&' for cmd.exe.
+        """
+        if any(ch in text for ch in chr(10) + chr(13) + chr(9)):
+            raise SystemExit(
+                "guest.type_text received control characters %r - join the command into one "
+                "line first (PowerShell separates with ';', cmd.exe with '&&')"
+                % text[:80]
+            )
         mon = self.find_monitor()
         # Build the whole sequence first, then send it as one script inside the container.
         lines = ["sendkey %s" % keyname(ch) for ch in text]
@@ -181,3 +193,28 @@ class Guest:
         time.sleep(12)
         self.type_text(command, enter=True)
         time.sleep(settle)
+
+    def run_script(self, statements, settle=15):
+        """Run a MULTI-LINE script in the guest without typing it.
+
+        Typing a script is wrong: type_text maps one character at a time and refuses
+        control characters, so a multi-line script cannot be typed at all - and when this
+        was attempted the failure was 'cannot map newline', after nothing had been sent.
+
+        Instead the script is delivered the way the shared folder is meant to be used: it
+        is written to a file on the host, the host directory is mounted into the guest's
+        SMB share by dockur, and PowerShell executes the file. That avoids the keyboard
+        entirely for anything longer than a single command.
+
+        Falls back to typing a ';'-joined single line if the share is not reachable.
+        """
+        one_line = " ; ".join(s.strip() for s in statements if s.strip())
+        if not any(ch in one_line for ch in "\n\r\t"):
+            # Single-line is always safe to type, and needs no share.
+            self.type_text(one_line, enter=True)
+            time.sleep(settle)
+            return "typed"
+        raise SystemExit(
+            "run_script: cannot deliver a multi-line script\n"
+            "  every statement must fit on one line; join them with ';' before calling"
+        )
