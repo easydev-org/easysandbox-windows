@@ -85,6 +85,30 @@ def parse_boot_from_hd(log_text):
     return bool(re.search(r'starting Boot[0-9A-Fa-f]{4} "Windows Boot Manager" from .*HD\(', log_text or ""))
 
 
+def qemu_argv(container):
+    """Read QEMU argument list from inside the container, using python3.
+
+    Not the shell. The shell version used tr with a backslash-zero escape, and the
+    container's /bin/sh is dash, which does not interpret it - the command produced no
+    output, parse_disk_path got an empty string, and extract fell back to copying a 12 GiB
+    file by guesswork, running twenty minutes without finishing. Same shape as /dev/tcp:
+    an unimplemented escape yields an empty result instead of an error.
+    """
+    code = (
+        "import glob, sys" + chr(10) +
+        "for d in glob.glob('/proc/[0-9]*'):" + chr(10) +
+        "    try:" + chr(10) +
+        "        c = open(d + '/cmdline', 'rb').read()" + chr(10) +
+        "    except Exception:" + chr(10) +
+        "        continue" + chr(10) +
+        "    if b'qemu-system' in c:" + chr(10) +
+        "        sys.stdout.write(bytes([10]).join(c.split(bytes([0]))).decode('latin-1'))" + chr(10) +
+        "        break" + chr(10)
+    )
+    r = xsh.run(["docker", "exec", container, "python3", "-c", code], echo=False)
+    return (r.out or "").splitlines()
+
+
 def is_qcow2(path):
     out = xsh.run(["qemu-img", "info", path], echo=False)
     return "file format: qcow2" in (out.out or "")
@@ -189,10 +213,7 @@ def stage_start(cfg):
     # network.sh and is not in this repository, so the running container is the only honest
     # source - and a bracket expression passed through sh -c is what once returned the
     # literal text "hostfwd=[^" for every line.
-    argv_out = xsh.run(
-        ["docker", "exec", cfg.name, "sh", "-c",
-         "for p in $(pgrep -f qemu-system); do tr '\\0' '\\n' < /proc/$p/cmdline; done"],
-        echo=False).out or ""
+    argv_out = chr(10).join(qemu_argv(cfg.name))
     fwd = [a for a in argv_out.splitlines() if "hostfwd" in a or a.startswith("netdev")]
     log("qemu network arguments: %s" % (" ".join(fwd) if fwd else "(none)"))
 
@@ -286,10 +307,7 @@ def stage_wait(cfg):
     # not worth guessing either: a host-side find once came up empty on a run whose disk
     # was plainly 18 GiB.
     try:
-        cmdline = xsh.run(
-            ["docker", "exec", cfg.name, "sh", "-c",
-             "for p in $(pgrep -f qemu-system); do tr '\\0' '\\n' < /proc/$p/cmdline; done"],
-            echo=False).out or ""
+        cmdline = chr(0).join(qemu_argv(cfg.name))
         disk = parse_disk_path(cmdline)
         if disk:
             with open(os.path.join(cfg.storage, ".disk-path"), "w") as f:
@@ -339,10 +357,7 @@ def stage_extract(cfg):
             inner = None
     if not inner:
         # Last try: this stage may be used on its own, with the container still up.
-        cmdline = xsh.run(
-            ["docker", "exec", cfg.name, "sh", "-c",
-             "for p in $(pgrep -f qemu-system); do tr '\\0' '\\n' < /proc/$p/cmdline; done"],
-            echo=False).out or ""
+        cmdline = chr(0).join(qemu_argv(cfg.name))
         inner = parse_disk_path(cmdline)
 
     # docker exec cannot inspect a stopped container, so the path is recorded while it runs.
