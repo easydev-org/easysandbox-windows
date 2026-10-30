@@ -20,7 +20,7 @@ on:
       pull_tag:
         description: "ghcr tag under golden-disk-windows holding the sshd disk"
         required: false
-        default: "openssh"
+        default: "ssh-latest"
       bootstate_run:
         description: "Run id holding the bootstate artifact"
         required: false

@@ -130,6 +130,21 @@ jobs:
       - name: bake extract disk
         if: always()
         run: sudo -E python3 scripts/bake_golden.py extract
+      # Publish to ghcr as well as uploading the artifact. The artifact is what the next
+      # stage downloads when it runs immediately after; ghcr is where the disk is kept.
+      # Two tags: base-<stamp> for this build forever, base-latest for whoever wants the
+      # current one. ghcr_push_disk.py puts both on one manifest and reads each back.
+      - name: publish to ghcr
+        if: always()
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: >-
+          sudo -E python3 scripts/bake_golden.py publish
+          --out ${{ github.workspace }}/out/windows.qcow2
+          --publish-repo ghcr.io/easydev-org/golden-disk-windows
+          --publish-tag base
+
       - name: debug container
         if: failure()
         run: |

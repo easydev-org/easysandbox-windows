@@ -160,7 +160,7 @@ jobs:
           python3 scripts/openssh_setup.py publish
           --out-name windows-openssh.qcow2
           --publish-repo ghcr.io/easydev-org/golden-disk-windows
-          --publish-tag openssh
+          --publish-tag ssh
 
       # The BOOTSTATE still goes as an artifact: it is a few hundred KB, it is useless
       # without the disk, and pulling two things from two places to boot one machine is

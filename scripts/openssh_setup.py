@@ -281,58 +281,63 @@ def stage_export(args):
 
 
 def stage_publish(args):
-    """Push the exported disk to ghcr as an OCI artifact.
+    """Push the exported disk to ghcr, under a timestamped tag and a moving alias.
 
-    WHY GHCR AND NOT AN ACTIONS ARTIFACT. The artifact route was measured here: downloading
-    14040 MiB between workflows ran over 1000 seconds without finishing, which is the same
-    range dockur-macos recorded ("106 seconds to not finished after 1085"). The same file in
-    ghcr is fetched through a CDN, and - more to the point - that is where the sandbox images
-    already expect a golden disk to come from. This is the production path, not extra
-    machinery.
+    WHY GHCR AND NOT AN ACTIONS ARTIFACT. Measured here: a 14 GiB disk between workflows as
+    an artifact ran over 1000 seconds without finishing, the same range dockur-macos
+    recorded. ghcr is a CDN, and it is where the sandbox images already look for a golden
+    disk - so this is the production path, not extra machinery.
 
-    The disk is uploaded in 1 GiB layers by scripts/ghcr_push_disk.py, which also records
-    disk.sha256 in the manifest so a consumer verifies the reassembled file instead of
-    trusting the transport. That script was written for this organisation and already
-    publishes golden-disk-windows:base.
+    TWO TAGS PER BUILD, because one name cannot do both jobs:
+
+      base-20261030T081500   immutable. Names this exact disk forever, so a regression can
+                             be traced to the build that introduced it, and a known-good
+                             disk can still be pulled after newer ones exist.
+      base-latest            moves with each build. What a consumer follows.
+
+    Pushing only "base" would overwrite the previous disk on every build, and there would be
+    no way to say "the disk from Tuesday" - which is the question asked when something
+    starts failing.
+
+    Both names point at one manifest: the layers upload once and the alias costs a few
+    hundred bytes. ghcr_push_disk.py does the alias and reads each tag back, because a tag
+    resolving to a different digest is worse than a failed push.
     """
     out_name = args.out_name or "windows.qcow2"
     path = os.path.join("out", out_name)
     xsh.need(os.path.exists(path), "no %s to publish - run export first" % path)
-    size = os.path.getsize(path)
-    print("  %s: %.1f MiB" % (path, size / 2 ** 20), flush=True)
+    print("  %s: %.1f MiB" % (path, os.path.getsize(path) / 2 ** 20), flush=True)
 
     target = args.publish_repo or "ghcr.io/easydev-org/golden-disk-windows"
-    tag = args.publish_tag or "base"
-    print("  -> %s:%s" % (target, tag), flush=True)
+    base_tag = args.publish_tag or "base"
+
+    # SOURCE_DATE_EPOCH lets a caller pin the name; otherwise the clock decides. UTC with
+    # second resolution, so two builds cannot collide by accident.
+    stamp = args.stamp
+    if not stamp:
+        epoch = os.environ.get("SOURCE_DATE_EPOCH")
+        stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime(int(epoch) if epoch else None))
+    versioned = "%s-%s" % (base_tag, stamp)
+    alias = "%s-latest" % base_tag
+    print("  -> %s:%s  (alias %s)" % (target, versioned, alias), flush=True)
+
     env = dict(os.environ)
     xsh.need(env.get("GHCR_TOKEN"), "GHCR_TOKEN is not set (needs write:packages)")
     env.setdefault("GHCR_USER", os.environ.get("GITHUB_ACTOR", "easydev-org"))
 
-    r = xsh.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                              "ghcr_push_disk.py"), path, target, tag],
+    r = xsh.run([sys.executable,
+                 os.path.join(os.path.dirname(os.path.abspath(__file__)), "ghcr_push_disk.py"),
+                 path, target, versioned, alias],
                 echo=True)
-    xsh.need(r.ok, "push to %s:%s failed" % (target, tag))
+    xsh.need(r.ok, "push to %s:%s failed" % (target, versioned))
 
-    # Read it back rather than trusting the push: the manifest is fetched and its layer
-    # count and sha256 annotation compared with what was just sent.
-    print("--- reading the manifest back ---", flush=True)
-    import json as _json
-    import urllib.request as _u
-    import base64 as _b64
-    owner, repo = target.replace("ghcr.io/", "").split("/", 1)
-    basic = _b64.b64encode(("x-access-token:" + env["GHCR_TOKEN"]).encode()).decode()
-    tok = _json.load(_u.urlopen(_u.Request(
-        "https://ghcr.io/token?scope=repository:%s:pull&service=ghcr.io" % repo,
-        headers={"Authorization": "Basic " + basic}), timeout=60))["token"]
-    accept = "application/vnd.oci.image.manifest.v1+json"
-    m = _json.load(_u.urlopen(_u.Request(
-        "https://ghcr.io/v2/%s/manifests/%s" % (repo, tag),
-        headers={"Authorization": "Bearer " + tok, "Accept": accept}), timeout=60))
-    print("  layers: %d" % len(m.get("layers", [])), flush=True)
-    ann = m.get("annotations") or {}
-    print("  disk.sha256: %s" % ann.get("disk.sha256", "(absent)"), flush=True)
-    xsh.need(ann.get("disk.sha256"), "the pushed manifest has no disk.sha256 annotation")
-    print("published: ghcr.io/%s:%s" % (repo, tag), flush=True)
+    print("published:", flush=True)
+    print("  versioned  %s:%s" % (target, versioned), flush=True)
+    print("  alias      %s:%s" % (target, alias), flush=True)
+    if args.tag_file:
+        with open(args.tag_file, "w") as f:
+            f.write(versioned + chr(10) + alias + chr(10))
+        print("  wrote %s" % args.tag_file, flush=True)
     return 0
 
 
@@ -386,6 +391,10 @@ def main(argv=None):
     ap.add_argument("--publish-tag", default="base")
     ap.add_argument("--pull-repo", default="golden-disk-windows")
     ap.add_argument("--pull-tag", default="base")
+    ap.add_argument("--stamp", default="",
+                    help="publish: version stamp; defaults to UTC now")
+    ap.add_argument("--tag-file", default="",
+                    help="publish: write the versioned and alias tags here")
     args = ap.parse_args(argv)
 
     if args.stage == "selftest":

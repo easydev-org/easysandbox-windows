@@ -42,7 +42,14 @@ def put(url, data, tok, ctype):
 
 
 def main():
+    # ghcr_push_disk.py <disk.qcow2> <ghcr.io/owner/repo> <tag> [more-tags...]
+    #
+    # Extra tags are aliases of the same manifest: the layers are uploaded once and the
+    # additional names are pointers, so "dev-20261030T0815" and "dev-latest" cost one push.
+    if len(sys.argv) < 4:
+        sys.exit("usage: ghcr_push_disk.py <disk> <ghcr.io/owner/repo> <tag> [tag...]")
     path, ref, tag = sys.argv[1], sys.argv[2], sys.argv[3]
+    extra_tags = sys.argv[4:]
     # ref = ghcr.io/owner/repo
     host, owner, repo = ref.split("/", 2)[0], ref.split("/", 2)[1], ref.split("/", 2)[2]
     pat = os.environ.get("GHCR_TOKEN") or sys.exit("set GHCR_TOKEN")
@@ -127,9 +134,37 @@ def main():
         },
     }
     mb = json.dumps(manifest).encode()
-    status, _ = put(f"https://{host}/v2/{owner}/{repo}/manifests/{tag}", mb, tok,
-                    "application/vnd.oci.image.manifest.v1+json")
-    print(f"manifest {status}: {ref}:{tag} ({len(layers)} layers)")
+
+    # ONE UPLOAD, SEVERAL TAGS.
+    #
+    # The layers are the expensive part and they are already in the registry; a tag is a
+    # pointer to the manifest. PUTting the same manifest bytes under a second name costs a
+    # few hundred bytes and no upload, which is what makes an alias possible at all.
+    #
+    # The convention this serves: an immutable tag carrying a timestamp (base-20261030T0815)
+    # so a past build can always be named and reproduced, and a moving one (base-latest) that
+    # consumers follow. Without the timestamp the older disk becomes unreachable the moment a
+    # new one is pushed under the same name.
+    tags = [tag] + extra_tags
+    for t in tags:
+        status, _ = put(f"https://{host}/v2/{owner}/{repo}/manifests/{t}", mb, tok,
+                        "application/vnd.oci.image.manifest.v1+json")
+        print(f"manifest {status}: {ref}:{t}")
+
+    # READ EACH ONE BACK. A tag that was accepted but points at a different digest is worse
+    # than a failed push, because consumers would fetch an old disk under a new name.
+    digest = "sha256:" + hashlib.sha256(mb).hexdigest()
+    for t in tags:
+        try:
+            back = json.load(get(f"https://{host}/v2/{owner}/{repo}/manifests/{t}", tok,
+                                 "application/vnd.oci.image.manifest.v1+json"))
+            same = (back.get("annotations") or {}).get("disk.sha256") == disk_sha
+            print(f"  {t}: disk.sha256 {'matches' if same else 'DIFFERS'}")
+            if not same:
+                sys.exit(f"tag {t} does not point at the disk just pushed")
+        except Exception as e:
+            sys.exit(f"could not read back tag {t}: {e}")
+    print(f"published {ref}: " + ", ".join(tags))
 
 
 if __name__ == "__main__":

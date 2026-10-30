@@ -427,7 +427,43 @@ def build_config(args):
     cfg.wait_screen = args.wait
     cfg.shots = args.shots
     cfg.disk_path = args.disk_path
+    cfg.publish_repo = args.publish_repo
+    cfg.publish_tag = args.publish_tag
     return cfg
+
+
+def stage_publish(cfg):
+    """Push the baked disk to ghcr, versioned and aliased.
+
+    Same two-name rule as the later stages: base-<stamp> names this build forever,
+    base-latest moves. A bake is the most expensive thing here, so being able to say
+    "the disk from this morning" is worth two tags.
+
+    shares ghcr_push_disk.py with the other stages, which uploads the file in 1 GiB layers
+    and records disk.sha256 in the manifest.
+    """
+    if not os.path.exists(cfg.out):
+        log("no %s to publish" % cfg.out)
+        return 1
+    size = os.path.getsize(cfg.out)
+    log("%s: %.1f MiB" % (cfg.out, size / 2 ** 20))
+    token = os.environ.get("GHCR_TOKEN")
+    if not token:
+        log("GHCR_TOKEN is not set - skipping publish")
+        return 1
+    stamp = os.environ.get("STAMP") or time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+    versioned = "%s-%s" % (cfg.publish_tag, stamp)
+    alias = "%s-latest" % cfg.publish_tag
+    log("-> %s:%s (alias %s)" % (cfg.publish_repo, versioned, alias))
+    r = xsh.run([sys.executable,
+                 os.path.join(os.path.dirname(os.path.abspath(__file__)), "ghcr_push_disk.py"),
+                 cfg.out, cfg.publish_repo, versioned, alias], echo=True)
+    if not r.ok:
+        log("push failed")
+        return 1
+    log("published %s:%s" % (cfg.publish_repo, versioned))
+    log("alias      %s:%s" % (cfg.publish_repo, alias))
+    return 0
 
 
 def selftest():
@@ -499,7 +535,7 @@ def main(argv=None):
     argv = argv if argv is not None else sys.argv[1:]
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("stage", nargs="?",
-                    choices=["prepare", "start", "wait", "shot", "extract", "all", "selftest"],
+                    choices=["prepare", "start", "wait", "shot", "extract", "publish", "all", "selftest"],
                     default="all")
     ap.add_argument("--version", default=os.environ.get("VERSION", "11"))
     ap.add_argument("--disk-size", default=os.environ.get("DISK_SIZE", "64G"))
@@ -513,6 +549,8 @@ def main(argv=None):
     ap.add_argument("--wait", type=int, default=int(os.environ.get("WAIT", "7200")))
     ap.add_argument("--shots", default=os.environ.get("SHOTS", "screenshots"))
     ap.add_argument("--disk-path", default=os.environ.get("DISK_PATH", ""))
+    ap.add_argument("--publish-repo", default=os.environ.get("PUBLISH_REPO", "ghcr.io/easydev-org/golden-disk-windows"))
+    ap.add_argument("--publish-tag", default=os.environ.get("PUBLISH_TAG", "base"))
     args = ap.parse_args(argv)
 
     if args.stage == "selftest":
@@ -532,6 +570,8 @@ def main(argv=None):
         stage_shot(cfg)
     if args.stage in ("extract", "all"):
         stage_extract(cfg)
+    if args.stage in ("publish", "all"):
+        return stage_publish(cfg)
     return 0
 
 
