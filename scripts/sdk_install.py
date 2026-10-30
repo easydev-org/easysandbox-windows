@@ -31,14 +31,22 @@ import xsh
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# THE IDS ARE VERIFIED AGAINST microsoft/winget-pkgs, not guessed. The first attempt used
+# Microsoft.WindowsSDK.10, which does not exist: the manifests live under
+# manifests/m/Microsoft/WindowsSDK/10/0/<build>/, so the identifier is
+# Microsoft.WindowsSDK.10.0.26100. winget answered exit 20 for the wrong one.
+#
+# BuildTools takes its workload through --override, and --override cannot be combined with
+# --accept-package-agreements: winget printed its help and exited 2. The agreements are
+# accepted by the switches passed TO the override string instead, which is what the installer
+# itself understands.
 PACKAGES = [
     ("Microsoft.VisualStudio.2022.BuildTools",
-     ["--override",
-      "--quiet --wait --norestart --nocache "
-      "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"],
+     "--quiet --wait --norestart --nocache --accept-license "
+     "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended",
      "MSVC, the Windows SDK and CMake; --quiet alone installs an empty shell"),
-    ("Microsoft.WindowsSDK.10", [], "the SDK on its own"),
-    ("Microsoft.DotNet.SDK.10", [], "the .NET SDK, which VCTools does not include"),
+    ("Microsoft.WindowsSDK.10.0.26100", None, "the SDK on its own"),
+    ("Microsoft.DotNet.SDK.10", None, "the .NET SDK, which VCTools does not include"),
 ]
 
 
@@ -101,11 +109,20 @@ def stage_install(port, user, password):
             continue
         print("=== %s ===" % pid, flush=True)
         print("  %s" % why, flush=True)
-        cmd = " ".join(
-            ["winget", "install", "--id", pid, "--exact", "--source", "winget",
-             "--accept-source-agreements", "--accept-package-agreements",
-             "--disable-interactivity"] + extra
-        )
+        if extra:
+            # --override replaces winget's own switch set, so the accept flags that winget
+            # would add must be inside the string, not alongside it.
+            cmd = " ".join(
+                ["winget", "install", "--id", pid, "--exact", "--source", "winget",
+                 "--accept-source-agreements", "--disable-interactivity",
+                 "--override", extra]
+            )
+        else:
+            cmd = " ".join(
+                ["winget", "install", "--id", pid, "--exact", "--source", "winget",
+                 "--accept-source-agreements", "--accept-package-agreements",
+                 "--disable-interactivity"]
+            )
         print("  running: %s" % cmd, flush=True)
         # BuildTools with a workload is slow; ten minutes is ordinary on a fresh machine.
         r = ssh_run(port, user, password, cmd, timeout=3600)
