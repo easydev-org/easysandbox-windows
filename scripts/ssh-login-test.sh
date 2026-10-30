@@ -24,13 +24,34 @@ for i in $(seq 1 "$ATTEMPTS"); do
   out=$(sshpass -p "$PASSWORD" ssh -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 \
         -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-        -p "$PORT" "$USER_NAME@$HOST" "echo SSH-OK; whoami; hostname" 2>&1 || true)
+        -p "$PORT" "$USER_NAME@$HOST" "echo SSH-OK; whoami; hostname" 2>/tmp/ssherr.$$ || true)
+  err=$(cat /tmp/ssherr.$$ 2>/dev/null | tr -d "\r" | tr "\n" " "); rm -f /tmp/ssherr.$$
   flat=$(printf "%s" "$out" | tr -d "\r" | tr "\n" " ")
-  echo "    -> ${flat:-no output}"
+  echo "    stdout: ${flat:-<empty>}"
+  echo "    stderr: ${err:-<empty>}"
+
+  # MATCH THE RESULT, NOT THE WORD.
+  #
+  # The first version tested  case "$out" in *SSH-OK*)  and reported success. It was a
+  # false green: the output was
+  #     Warning: Permanently added ... SSH-OK; whoami; hostname
+  # where 'SSH-OK; whoami; hostname' is the command echoed back inside ssh's own error
+  # text, not its output. The remote command never ran, and the literal string in the
+  # message satisfied the pattern.
+  #
+  # The real thing has three lines and no warning:  SSH-OK / the user / the hostname.
+  # So: require a line that is EXACTLY SSH-OK, and require the second line to be the
+  # user name, and reject any output that still contains the semicolons (an echo).
   case "$out" in
-    *SSH-OK*)
-      echo "  VERIFIED: logged in as $USER_NAME, shell responded"
-      exit 0
+    *';'*) echo "  not verified: the output still contains the command line, so it was echoed";;
+    *)
+      second=$(printf "%s" "$out" | tr -d "\r" | sed -n "2p" | tr -d " ")
+      if printf "%s" "$out" | tr -d "\r" | grep -qx "SSH-OK" && [ "$second" = "$USER_NAME" ]; then
+        echo "  VERIFIED: logged in as $USER_NAME, shell responded with its hostname"
+        echo "    host: $(printf "%s" "$out" | tr -d "\r" | sed -n "3p")"
+        exit 0
+      fi
+      echo "  not verified: SSH-OK line or user line missing"
       ;;
   esac
   sleep 15
