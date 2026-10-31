@@ -203,6 +203,20 @@ def stage_install(port, user, password):
     # open for that failed - the run showed Connection closed by remote host right after it
     # started, and the install carried on unwatched. So: start it detached, then ask its
     # status in short round trips.
+    # BEFORE STARTING: can the guest reach the VS download hosts? The bootstrapper downloads
+    # its payload from download.visualstudio.microsoft.com, and a failure there produces a
+    # run that lasts minutes, installs nothing, and leaves no log - which is what happened.
+    print("=== can the guest reach the Visual Studio download hosts ===", flush=True)
+    for hostname in ("download.visualstudio.microsoft.com",
+                     "aka.ms",
+                     "vscdn.azureedge.net"):
+        r = ssh_run(port, user, password,
+                    "powershell -NoProfile -Command "
+                    "'(Test-NetConnection %s -Port 443).TcpTestSucceeded'" % hostname,
+                    timeout=180)
+        out = ((r.out or "") + (r.err or "")).strip().splitlines()
+        print("  %-42s %s" % (hostname, out[-1][:20] if out else "(no output)"), flush=True)
+
     print("=== adding the VCTools workload ===", flush=True)
     script = os.path.join(HERE, "ps", "vs-start.ps1")
     remote = "C:/Users/%s/vs-start.ps1" % user
@@ -222,6 +236,15 @@ def stage_install(port, user, password):
                  "-P", str(port), status_local, "%s@127.0.0.1:%s" % (user, status_remote)],
                 echo=False, timeout=300)
     xsh.need(r.ok, "could not copy vs-status.ps1: %s" % (r.err or r.out))
+
+    diag_local = os.path.join(HERE, "ps", "vs-diag.ps1")
+    diag_remote = "C:/Users/%s/vs-diag.ps1" % user
+    r = xsh.run(["sshpass", "-p", password, "scp",
+                 "-o", "StrictHostKeyChecking=no",
+                 "-o", "UserKnownHostsFile=/dev/null",
+                 "-P", str(port), diag_local, "%s@127.0.0.1:%s" % (user, diag_remote)],
+                echo=False, timeout=300)
+    xsh.need(r.ok, "could not copy vs-diag.ps1: %s" % (r.err or r.out))
     r = ssh_run(port, user, password,
                 "powershell -NoProfile -ExecutionPolicy Bypass -File " + remote,
                 timeout=600)
@@ -249,6 +272,13 @@ def stage_install(port, user, password):
             break
         if state == "stopped":
             print("  installer finished without VCTools", flush=True)
+            # Nine minutes, 37 GB free, and no log anywhere it was expected: run the wider
+            # diagnostic before concluding anything.
+            rd = ssh_run(port, user, password,
+                         "powershell -NoProfile -ExecutionPolicy Bypass -File " + diag_remote,
+                         timeout=600)
+            for line in ((rd.out or "") + (rd.err or "")).splitlines()[:60]:
+                print("  " + line.strip()[:150], flush=True)
             # The status script includes the installer log when it has finished; print it,
             # because a run that lasted nine minutes and installed nothing has its reason
             # there and nowhere else.
