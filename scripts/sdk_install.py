@@ -294,11 +294,16 @@ def stage_verify(port, user, password):
                 "powershell -NoProfile -ExecutionPolicy Bypass -File " + remote,
                 timeout=900)
     out = (r.out or "") + (r.err or "")
-    if "hello-from-msvc" in out:
+    # PRINT EVERY LINE. The script reports each stage - where vswhere looked, what it found,
+    # whether vcvars exists, the cl exit code - and truncating to the last six lines threw all
+    # of that away and left only the verdict.
+    for line in out.strip().splitlines():
+        t = line.strip()
+        if t and not t.startswith("Warning: Permanently added"):
+            print("  " + t[:150], flush=True)
+    if "COMPILE_OK" in out or "hello-from-msvc" in out:
         print("  compiled and ran: hello-from-msvc", flush=True)
     else:
-        for line in out.strip().splitlines()[-6:]:
-            print("  " + line[:150], flush=True)
         failures.append("compile+run")
 
     if failures:
