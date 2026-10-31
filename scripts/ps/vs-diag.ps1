@@ -1,27 +1,31 @@
 $ErrorActionPreference = "Continue"
 
-$t = $env:TEMP
+Write-Output "--- defender status ---"
+try { $m = Get-MpPreference -ErrorAction Stop; Write-Output ("  DisableRealtimeMonitoring: " + $m.DisableRealtimeMonitoring) } catch { Write-Output "  Get-MpPreference unavailable" }
+try { $s = Get-MpComputerStatus -ErrorAction Stop; Write-Output ("  RealTimeProtectionEnabled: " + $s.RealTimeProtectionEnabled); Write-Output ("  AntivirusEnabled: " + $s.AntivirusEnabled) } catch { Write-Output "  Get-MpComputerStatus unavailable" }
 
-Write-Output "--- extracted dir contents ---"
-Get-ChildItem $t -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "^[0-9a-f]{20,}" } | ForEach-Object {
-    Write-Output ("dir: " + $_.FullName)
-    Get-ChildItem $_.FullName -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-        Write-Output ("  " + $_.Length + "  " + $_.Name)
-    }
-}
+Write-Output "--- defender detections in the last hour ---"
+try {
+    Get-MpThreatDetection -ErrorAction Stop | Sort-Object InitialDetectionTime -Descending | Select-Object -First 5 | ForEach-Object { Write-Output ("  " + $_.InitialDetectionTime + "  " + $_.Resources) }
+} catch { Write-Output "  no detections or unavailable" }
 
-Write-Output "--- does vs_setup exist in the extracted dir ---"
-$setup = Get-ChildItem $t -Recurse -Filter "vs_setup.exe" -ErrorAction SilentlyContinue | Select-Object -First 3
-if ($setup) { $setup | ForEach-Object { Write-Output ("  " + $_.FullName + "  " + $_.Length) } } else { Write-Output "  no vs_setup.exe found" }
+Write-Output "--- defender quarantine ---"
+try {
+    Get-MpThreat -ErrorAction Stop | Sort-Object LastThreatStatusChangeTime -Descending | Select-Object -First 5 | ForEach-Object { Write-Output ("  " + $_.ThreatName + "  " + $_.Resources) }
+} catch { Write-Output "  none" }
 
-Write-Output "--- dd_setup logs (the installer itself) ---"
-Get-ChildItem $t -Filter "dd_setup*" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 3 | ForEach-Object {
-    Write-Output ("  === " + $_.Name + " (" + $_.Length + ")")
-    Get-Content $_.FullName -Tail 30 -ErrorAction SilentlyContinue | ForEach-Object { Write-Output ("    " + $_) }
-}
+Write-Output "--- the exe itself ---"
+$exe = Join-Path $env:TEMP "vs_BuildTools.exe"
+if (Test-Path $exe) {
+    $f = Get-Item $exe
+    Write-Output ("  size: " + $f.Length)
+    Write-Output ("  created: " + $f.CreationTime)
+    $h = (Get-FileHash $exe -Algorithm SHA256).Hash
+    Write-Output ("  sha256: " + $h)
+    $sig = Get-AuthenticodeSignature $exe
+    Write-Output ("  signature: " + $sig.Status)
+    Write-Output ("  signer: " + $sig.SignerCertificate.Subject)
+} else { Write-Output "  vs_BuildTools.exe gone" }
 
-Write-Output "--- anything matching error in dd_bootstrapper ---"
-Get-ChildItem $t -Filter "dd_bootstrapper*" -ErrorAction SilentlyContinue | ForEach-Object {
-    Write-Output ("  === " + $_.Name + " (")
-    Get-Content $_.FullName -Tail 40 -ErrorAction SilentlyContinue | ForEach-Object { Write-Output ("    " + $_) }
-}
+Write-Output "--- disk errors in system log ---"
+Get-EventLog -LogName System -EntryType Error -Newest 5 -ErrorAction SilentlyContinue | ForEach-Object { Write-Output ("  " + $_.TimeGenerated.ToString("HH:mm") + "  " + $_.Source + ": " + ($_.Message -split [char]10)[0]) }

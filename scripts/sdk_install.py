@@ -426,7 +426,8 @@ def selftest():
         ("msvc-check.ps1", ["Installer" + bslash + "vswhere.exe",
                             "Build" + bslash + "vcvars64.bat", "hello-from-msvc"]),
         ("vs-start.ps1", ["aka.ms/vs/17/release/vs_BuildTools.exe",
-                          "Start-Process", "Workload.VCTools"]),
+                          "Start-Process", "Workload.VCTools",
+                          "Set-MpPreference", "DisableRealtimeMonitoring"]),
         ("vs-status.ps1", ["Installer" + bslash + "vswhere.exe",
                            "INSTALL_RUNNING", "VCTOOLS_PRESENT", "free on C:"]),
     ]:
