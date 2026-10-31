@@ -43,14 +43,27 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # accepted by the switches passed TO the override string instead, which is what the installer
 # itself understands.
 PACKAGES = [
-    # BuildTools is NOT here. winget pins 17.9.7, whose manifest caps the supported OS at
-    # 10.0.22000; this guest is 10.0.26200, so the installer marks every component
-    # "not applicable", installs nothing and exits 1. It is installed instead by the
-    # evergreen bootstrapper in ps/vs-workload.ps1, which fetches a manifest that knows
-    # about current builds. Adding both would give two installers of the same product.
-    ("Microsoft.WindowsSDK.10.0.26100", None, "the SDK on its own"),
-    ("Microsoft.DotNet.SDK.10", None, "the .NET SDK, which VCTools does not include"),
-    ("Microsoft.PowerShell", None,
+    # BuildTools 17.9.7 is NOT used, and neither is the evergreen bootstrapper.
+    #
+    # 17.9.7 (what winget resolves to from a stale index) carries a manifest that caps the
+    # supported OS at 10.0.22000; this guest is 10.0.26200, so every component is marked
+    # "not applicable" and nothing installs.
+    #
+    # The evergreen vs_BuildTools.exe got further - it fetched v17.14 - but its extraction
+    # directory came out empty, which is a different failure and still unexplained.
+    #
+    # winget DOES carry 17.14.44, whose manifest has no such OS cap. Pinning the version and
+    # the workload together is one mechanism instead of two, and winget does the download
+    # and the elevation itself.
+    ("Microsoft.VisualStudio.2022.BuildTools",
+     "17.14.44",
+     ["--override",
+      "--quiet --wait --norestart "
+      "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"],
+     "MSVC, the Windows SDK and CMake, from a version whose manifest knows this OS"),
+    ("Microsoft.WindowsSDK.10.0.26100", None, None, "the SDK on its own"),
+    ("Microsoft.DotNet.SDK.10", None, None, "the .NET SDK, which VCTools does not include"),
+    ("Microsoft.PowerShell", None, None,
      "PowerShell 7; last because its MSI can drop the ssh session"),
 ]
 
@@ -142,29 +155,34 @@ def stage_check_tools(port, user, password):
     print("  winget: %s" % (r.out or "").strip(), flush=True)
     r = ssh_run(port, user, password,
                 "winget list --source winget --accept-source-agreements")
-    already = [pid for pid, _, _ in PACKAGES if parse_winget_list(r.out, pid)]
+    already = [pid for pid, _v, _e, _w in PACKAGES if parse_winget_list(r.out, pid)]
     print("  already installed: %s" % (", ".join(already) if already else "(none)"),
           flush=True)
     return already
 
 
 def stage_install(port, user, password):
+    """Install every package through winget, with versions pinned where they matter."""
     installed = stage_check_tools(port, user, password)
-    for pid, extra, why in PACKAGES:
+    for pid, ver, extra, why in PACKAGES:
         if pid in installed:
             print("=== %s already installed ===" % pid, flush=True)
             continue
         print("=== %s ===" % pid, flush=True)
         print("  %s" % why, flush=True)
+
+        base = ["winget", "install", "--id", pid, "--exact", "--source", "winget"]
+        if ver:
+            base += ["--version", ver]
+
         if extra:
-            # A BATCH FILE, not a command line. The switch string crosses ssh -> cmd.exe ->
-            # winget -> vs_installer, and exit 87 (ERROR_INVALID_PARAMETER) is what the
-            # installer returns when the quotes have been eaten by one of those layers. A
-            # file has no layers above it.
+            # --override replaces winget own switch set, so --accept-package-agreements cannot
+            # be alongside it. A BATCH FILE keeps the switch string out of the
+            # ssh -> cmd.exe -> winget chain, where the quotes were being eaten.
             script = ("@echo off" + chr(13) + chr(10)
-                      + "winget install --id " + pid + " --exact --source winget "
-                      + "--accept-source-agreements --disable-interactivity "
-                      + "--override " + chr(34) + extra + chr(34) + chr(13) + chr(10))
+                      + " ".join(base)
+                      + " --accept-source-agreements --disable-interactivity"
+                      + " --override " + chr(34) + extra + chr(34) + chr(13) + chr(10))
             remote = "C:/Users/%s/install-%s.bat" % (user, pid.replace(".", "-"))
             fd, local = tempfile.mkstemp(suffix=".bat")
             with os.fdopen(fd, "w", newline="") as f:
@@ -177,15 +195,13 @@ def stage_install(port, user, password):
                         echo=False, timeout=120)
             finally:
                 os.unlink(local)
-            cmd = 'cmd /c "%s"' % remote.replace("/", chr(92))
+            cmd = "cmd /c " + chr(34) + remote.replace("/", chr(92)) + chr(34)
         else:
-            cmd = " ".join([
-                "winget", "install", "--id", pid, "--exact", "--source", "winget",
-                "--accept-source-agreements", "--accept-package-agreements",
-                "--disable-interactivity",
-            ])
+            cmd = " ".join(base + ["--accept-source-agreements",
+                                     "--accept-package-agreements",
+                                     "--disable-interactivity"])
+
         print("  running: %s" % cmd, flush=True)
-        # BuildTools with a workload is slow; ten minutes is ordinary on a fresh machine.
         r = ssh_run(port, user, password, cmd, timeout=3600)
         print("  exit %d" % r.code, flush=True)
         for line in [l for l in (r.out or "").splitlines() if l.strip()][-5:]:
@@ -193,102 +209,10 @@ def stage_install(port, user, password):
         if r.code != 0:
             print("  NOTE: winget returned %d; the machine is asked directly below" % r.code,
                   flush=True)
-        # Some MSIs restart a service or the guest itself. PowerShell 7 did, and every
-        # following step then failed with Connection refused - which reads as a dead machine.
+        # Some MSIs restart a service or the guest itself; PowerShell 7 did.
         if not wait_for_ssh(port, user, password, seconds=300, why=pid):
             print("  WARNING: continuing, but sshd is not answering", flush=True)
-    # ADD THE WORKLOAD, with a DETACHED bootstrapper and a polling loop.
-    #
-    # The bootstrapper installs several GB over ten to twenty minutes. Holding an ssh session
-    # open for that failed - the run showed Connection closed by remote host right after it
-    # started, and the install carried on unwatched. So: start it detached, then ask its
-    # status in short round trips.
-    # BEFORE STARTING: can the guest reach the VS download hosts? The bootstrapper downloads
-    # its payload from download.visualstudio.microsoft.com, and a failure there produces a
-    # run that lasts minutes, installs nothing, and leaves no log - which is what happened.
-    print("=== can the guest reach the Visual Studio download hosts ===", flush=True)
-    for hostname in ("download.visualstudio.microsoft.com",
-                     "aka.ms",
-                     "vscdn.azureedge.net"):
-        r = ssh_run(port, user, password,
-                    "powershell -NoProfile -Command "
-                    "'(Test-NetConnection %s -Port 443).TcpTestSucceeded'" % hostname,
-                    timeout=180)
-        out = ((r.out or "") + (r.err or "")).strip().splitlines()
-        print("  %-42s %s" % (hostname, out[-1][:20] if out else "(no output)"), flush=True)
 
-    print("=== adding the VCTools workload ===", flush=True)
-    script = os.path.join(HERE, "ps", "vs-start.ps1")
-    remote = "C:/Users/%s/vs-start.ps1" % user
-    r = xsh.run(["sshpass", "-p", password, "scp",
-                 "-o", "StrictHostKeyChecking=no",
-                 "-o", "UserKnownHostsFile=/dev/null",
-                 "-P", str(port), script, "%s@127.0.0.1:%s" % (user, remote)],
-                echo=False, timeout=300)
-    xsh.need(r.ok, "could not copy vs-start.ps1: %s" % (r.err or r.out))
-
-    # The status script is needed by the poll loop; copy it now, while scp is already at hand.
-    status_local = os.path.join(HERE, "ps", "vs-status.ps1")
-    status_remote = "C:/Users/%s/vs-status.ps1" % user
-    r = xsh.run(["sshpass", "-p", password, "scp",
-                 "-o", "StrictHostKeyChecking=no",
-                 "-o", "UserKnownHostsFile=/dev/null",
-                 "-P", str(port), status_local, "%s@127.0.0.1:%s" % (user, status_remote)],
-                echo=False, timeout=300)
-    xsh.need(r.ok, "could not copy vs-status.ps1: %s" % (r.err or r.out))
-
-    diag_local = os.path.join(HERE, "ps", "vs-diag.ps1")
-    diag_remote = "C:/Users/%s/vs-diag.ps1" % user
-    r = xsh.run(["sshpass", "-p", password, "scp",
-                 "-o", "StrictHostKeyChecking=no",
-                 "-o", "UserKnownHostsFile=/dev/null",
-                 "-P", str(port), diag_local, "%s@127.0.0.1:%s" % (user, diag_remote)],
-                echo=False, timeout=300)
-    xsh.need(r.ok, "could not copy vs-diag.ps1: %s" % (r.err or r.out))
-    r = ssh_run(port, user, password,
-                "powershell -NoProfile -ExecutionPolicy Bypass -File " + remote,
-                timeout=600)
-    for line in ((r.out or "") + (r.err or "")).strip().splitlines()[-8:]:
-        print("  " + line[:140], flush=True)
-
-    # POLL. Each check is a few seconds; the install is not tied to any of them.
-    deadline = time.time() + 3600
-    last = ""
-    while time.time() < deadline:
-        time.sleep(30)
-        r = ssh_run(port, user, password,
-                    "powershell -NoProfile -ExecutionPolicy Bypass -File "
-                    "C:/Users/%s/vs-status.ps1" % user, timeout=180)
-        out = (r.out or "") + (r.err or "")
-        state = "running" if "INSTALL_RUNNING" in out else "stopped"
-        present = "VCTOOLS_PRESENT" in out
-        version = [l.strip() for l in out.splitlines() if l.startswith("version:")]
-        now = "%s%s" % (state, (" / " + version[-1]) if version else "")
-        if now != last:
-            print("  %s" % now, flush=True)
-            last = now
-        if present:
-            print("  VCTools is present", flush=True)
-            break
-        if state == "stopped":
-            print("  installer finished without VCTools", flush=True)
-            # Nine minutes, 37 GB free, and no log anywhere it was expected: run the wider
-            # diagnostic before concluding anything.
-            rd = ssh_run(port, user, password,
-                         "powershell -NoProfile -ExecutionPolicy Bypass -File " + diag_remote,
-                         timeout=600)
-            for line in ((rd.out or "") + (rd.err or "")).splitlines()[:60]:
-                print("  " + line.strip()[:150], flush=True)
-            # The status script includes the installer log when it has finished; print it,
-            # because a run that lasted nine minutes and installed nothing has its reason
-            # there and nowhere else.
-            for line in out.splitlines():
-                t = line.strip()
-                if any(t.startswith(p) for p in ("--- ", "  ", "free on C:", "no installer log")):
-                    print("  " + t[:150], flush=True)
-            break
-
-    return stage_verify(port, user, password)
     return stage_verify(port, user, password)
 
 
@@ -306,19 +230,12 @@ def stage_verify(port, user, password):
     failures = []
 
     r = ssh_run(port, user, password, "winget list --source winget", timeout=300)
-    for pid, _, _ in PACKAGES:
+    for pid, _v, _e, _w in PACKAGES:
         present = parse_winget_list(r.out, pid)
         print("  %-45s %s" % (pid, "installed" if present else "MISSING"), flush=True)
         if not present:
             failures.append(pid)
 
-    # BuildTools is checked by asking vswhere, not winget: it is installed by the evergreen
-    # bootstrapper, so winget may not list it at all, and what matters is whether the product
-    # and its VCTools workload exist.
-    print("  %-45s %s" % ("Visual Studio BuildTools + VCTools", "checking..."), flush=True)
-
-    # pwsh is the PowerShell 7 binary; Windows PowerShell 5.1 is powershell.exe. Checking the
-    # executable rather than only the winget entry, because 'installed' and 'runs' differ.
     # pwsh is the PowerShell 7 binary; Windows PowerShell 5.1 is powershell.exe. Checked by
     # running it, not by reading the winget entry - installed and runs are different claims.
     #   pwsh -v  prints just the version, and needs no quotes or dollar signs.
