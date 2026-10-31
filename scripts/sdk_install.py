@@ -197,33 +197,59 @@ def stage_install(port, user, password):
         # following step then failed with Connection refused - which reads as a dead machine.
         if not wait_for_ssh(port, user, password, seconds=300, why=pid):
             print("  WARNING: continuing, but sshd is not answering", flush=True)
-    # ADD THE WORKLOAD, on the installed BuildTools.
+    # ADD THE WORKLOAD, with a DETACHED bootstrapper and a polling loop.
     #
-    # The script is a file staged with scp, for the same reason the sshd setup is: it
-    # contains C:\Program Files (x86)\... with spaces and backslashes, and inline those
-    # pass through ssh -> cmd.exe -> powershell, where characters get lost.
+    # The bootstrapper installs several GB over ten to twenty minutes. Holding an ssh session
+    # open for that failed - the run showed Connection closed by remote host right after it
+    # started, and the install carried on unwatched. So: start it detached, then ask its
+    # status in short round trips.
     print("=== adding the VCTools workload ===", flush=True)
-    script = os.path.join(HERE, "ps", "vs-workload.ps1")
-    remote = "C:/Users/%s/vs-workload.ps1" % user
+    script = os.path.join(HERE, "ps", "vs-start.ps1")
+    remote = "C:/Users/%s/vs-start.ps1" % user
     r = xsh.run(["sshpass", "-p", password, "scp",
                  "-o", "StrictHostKeyChecking=no",
                  "-o", "UserKnownHostsFile=/dev/null",
                  "-P", str(port), script, "%s@127.0.0.1:%s" % (user, remote)],
                 echo=False, timeout=300)
-    xsh.need(r.ok, "could not copy the workload script: %s" % (r.err or r.out))
+    xsh.need(r.ok, "could not copy vs-start.ps1: %s" % (r.err or r.out))
+
+    # The status script is needed by the poll loop; copy it now, while scp is already at hand.
+    status_local = os.path.join(HERE, "ps", "vs-status.ps1")
+    status_remote = "C:/Users/%s/vs-status.ps1" % user
+    r = xsh.run(["sshpass", "-p", password, "scp",
+                 "-o", "StrictHostKeyChecking=no",
+                 "-o", "UserKnownHostsFile=/dev/null",
+                 "-P", str(port), status_local, "%s@127.0.0.1:%s" % (user, status_remote)],
+                echo=False, timeout=300)
+    xsh.need(r.ok, "could not copy vs-status.ps1: %s" % (r.err or r.out))
     r = ssh_run(port, user, password,
                 "powershell -NoProfile -ExecutionPolicy Bypass -File " + remote,
-                timeout=3600)
-    out = ((r.out or "") + (r.err or "")).strip()
-    for line in out.splitlines()[-10:]:
+                timeout=600)
+    for line in ((r.out or "") + (r.err or "")).strip().splitlines()[-8:]:
         print("  " + line[:140], flush=True)
 
-    # The script asks the product whether VCTools is there, because the exit code has been
-    # misleading three times. Its answer, not the code, is what this step reports.
-    if "VCTOOLS_PRESENT" in out:
-        print("  VCTools is present", flush=True)
-    else:
-        print("  NOTE: VCTools not reported present; the compile check below decides", flush=True)
+    # POLL. Each check is a few seconds; the install is not tied to any of them.
+    deadline = time.time() + 3600
+    last = ""
+    while time.time() < deadline:
+        time.sleep(30)
+        r = ssh_run(port, user, password,
+                    "powershell -NoProfile -ExecutionPolicy Bypass -File "
+                    "C:/Users/%s/vs-status.ps1" % user, timeout=180)
+        out = (r.out or "") + (r.err or "")
+        state = "running" if "INSTALL_RUNNING" in out else "stopped"
+        present = "VCTOOLS_PRESENT" in out
+        version = [l.strip() for l in out.splitlines() if l.startswith("version:")]
+        now = "%s%s" % (state, (" / " + version[-1]) if version else "")
+        if now != last:
+            print("  %s" % now, flush=True)
+            last = now
+        if present:
+            print("  VCTools is present", flush=True)
+            break
+        if state == "stopped":
+            print("  installer finished without VCTools", flush=True)
+            break
 
     return stage_verify(port, user, password)
     return stage_verify(port, user, password)
@@ -362,9 +388,10 @@ def selftest():
     for name, needles in [
         ("msvc-check.ps1", ["Installer" + bslash + "vswhere.exe",
                             "Build" + bslash + "vcvars64.bat", "hello-from-msvc"]),
-        ("vs-workload.ps1", ["Installer" + bslash + "vswhere.exe",
-                             "aka.ms/vs/17/release/vs_BuildTools.exe", "Start-Process", "Workload.VCTools",
-                             "VCTOOLS_PRESENT"]),
+        ("vs-start.ps1", ["aka.ms/vs/17/release/vs_BuildTools.exe",
+                          "Start-Process", "Workload.VCTools"]),
+        ("vs-status.ps1", ["Installer" + bslash + "vswhere.exe",
+                           "INSTALL_RUNNING", "VCTOOLS_PRESENT"]),
     ]:
         path = os.path.join(HERE, "ps", name)
         if not os.path.exists(path):
