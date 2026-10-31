@@ -42,36 +42,43 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # accepted by the switches passed TO the override string instead, which is what the installer
 # itself understands.
 PACKAGES = [
-    # No --override. winget rejected the combination and printed help (exit 2). The
-    # workload is passed the way winget documents for this package instead.
-    # The workload has to reach the Visual Studio installer, which takes it as a custom
-    # argument. winget's own --add does not exist - it printed its help and exited 2 both
-    # times, with and without --override - so the installer switches go where the manifest
-    # says they go: InstallerSwitches.Custom, which winget surfaces as --custom.
-    # The switch string is the one microsoft/winget-pkgs documents for this package:
-    #   winget install Microsoft.VisualStudio.2022.BuildTools --override
-    #     "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
-    # --nocache was in the first version and the VS installer rejected it with exit 87
-    # (ERROR_INVALID_PARAMETER) - it is not one of its switches.
-    # NO --override AT ALL, and then a separate modify.
+    # ORDER MATTERS. PowerShell 7 goes last: its MSI restarts something that drops the SSH
+    # session, and while it ran in the middle every package after it failed with
+    # Connection refused - which reads as a dead machine rather than a restarting service.
     #
-    # exit 87 (ERROR_INVALID_PARAMETER) survived a batch file, so quoting was never the
-    # cause - and --override replaces the whole switch set winget passes to the installer,
-    # which is a large thing to replace to add one workload. So: install the package with
-    # winget's own switches (no overrides), then run the VS installer's modify verb with the
-    # workload, which is the supported way to add components to an existing BuildTools.
+    # Ids read from microsoft/winget-pkgs manifests, not inferred from folder names:
+    # Microsoft.WindowsSDK.10.0.26100 carries its build number, Microsoft.PowerShell does not.
     ("Microsoft.VisualStudio.2022.BuildTools",
      None,
-     "installed bare, then modified to add VCTools"),
+     "installed bare, then given VCTools with setup.exe install"),
     ("Microsoft.WindowsSDK.10.0.26100", None, "the SDK on its own"),
     ("Microsoft.DotNet.SDK.10", None, "the .NET SDK, which VCTools does not include"),
-    # PowerShell 7. The identifier is Microsoft.PowerShell with no version in it - the
-    # manifests live under manifests/m/Microsoft/PowerShell/<version>/, but the id itself is
-    # version-free, which is different from WindowsSDK.10.0.26100 above. Read from
-    # Microsoft.PowerShell.yaml, not inferred from the folder name - that inference is what
-    # produced a non-existent id for the SDK.
-    ("Microsoft.PowerShell", None, "PowerShell 7, alongside the Windows PowerShell 5.1"),
+    ("Microsoft.PowerShell", None,
+     "PowerShell 7; last because its MSI can drop the ssh session"),
 ]
+
+
+def wait_for_ssh(port, user, password, seconds=300, why=""):
+    """Wait until sshd answers again.
+
+    A winget package can restart something inside the guest - PowerShell 7 is an MSI and
+    touches the service host - and the session drops mid-install:
+        kex_exchange_identification: read: Connection reset by peer
+    Every later step then fails with 'Connection refused', which reads like the machine died.
+    This waits for it to come back, and reports how long it took, so a real death and a
+    transient restart look different.
+    """
+    start = time.time()
+    while time.time() - start < seconds:
+        r = ssh_run(port, user, password, "echo alive", timeout=30, echo=False)
+        if r.ok and "alive" in (r.out or ""):
+            waited = int(time.time() - start)
+            if waited > 0:
+                print("  sshd answered again after %ds%s" % (waited, (" (" + why + ")") if why else ""), flush=True)
+            return True
+        time.sleep(10)
+    print("  sshd did not answer within %ds%s" % (seconds, (" (" + why + ")") if why else ""), flush=True)
+    return False
 
 
 def ssh_run(port, user, password, command, timeout=1800, echo=True):
@@ -189,6 +196,10 @@ def stage_install(port, user, password):
         if r.code != 0:
             print("  NOTE: winget returned %d; the machine is asked directly below" % r.code,
                   flush=True)
+        # Some MSIs restart a service or the guest itself. PowerShell 7 did, and every
+        # following step then failed with Connection refused - which reads as a dead machine.
+        if not wait_for_ssh(port, user, password, seconds=300, why=pid):
+            print("  WARNING: continuing, but sshd is not answering", flush=True)
     # ADD THE WORKLOAD, on the installed BuildTools.
     #
     # The script is a file staged with scp, for the same reason the sshd setup is: it
