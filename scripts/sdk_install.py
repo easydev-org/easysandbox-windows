@@ -205,8 +205,16 @@ def stage_install(port, user, password):
     r = ssh_run(port, user, password,
                 "powershell -NoProfile -ExecutionPolicy Bypass -File " + remote,
                 timeout=3600)
-    for line in ((r.out or "") + (r.err or "")).strip().splitlines()[-8:]:
+    out = ((r.out or "") + (r.err or "")).strip()
+    for line in out.splitlines()[-10:]:
         print("  " + line[:140], flush=True)
+
+    # The script asks the product whether VCTools is there, because the exit code has been
+    # misleading three times. Its answer, not the code, is what this step reports.
+    if "VCTOOLS_PRESENT" in out:
+        print("  VCTools is present", flush=True)
+    else:
+        print("  NOTE: VCTools not reported present; the compile check below decides", flush=True)
 
     return stage_verify(port, user, password)
     return stage_verify(port, user, password)
@@ -247,10 +255,16 @@ def stage_verify(port, user, password):
     else:
         failures.append("pwsh")
 
+    # FULL PATH, because winget does not refresh PATH for sessions that already exist. The
+    # install succeeded - winget reported it and the SDK is on disk - but a new ssh session
+    # still sees the old environment and answers 'sdk-not-found' for the bare name.
     print("--- dotnet ---", flush=True)
-    r = ssh_run(port, user, password, "dotnet --version", timeout=300)
-    print("  %s" % ((r.out or r.err or "").strip()[:120] or "(no output)"), flush=True)
-    if not r.ok:
+    dotnet = ("C:" + chr(92) + "Program Files" + chr(92) + "dotnet" + chr(92) + "dotnet.exe")
+    r = ssh_run(port, user, password, '"' + dotnet + '" --version', timeout=300)
+    out = ((r.out or "") + (r.err or "")).strip()
+    last = out.splitlines()[-1].strip() if out else ""
+    print("  %s" % (last[:90] or "(no output)"), flush=True)
+    if not last[:1].isdigit():
         failures.append("dotnet")
 
     print("--- compile and run a program with MSVC ---", flush=True)
@@ -322,7 +336,8 @@ def selftest():
         ("msvc-check.ps1", ["Installer" + bslash + "vswhere.exe",
                             "Build" + bslash + "vcvars64.bat", "hello-from-msvc"]),
         ("vs-workload.ps1", ["Installer" + bslash + "vswhere.exe",
-                             "setup.exe", "Start-Process", "Workload.VCTools"]),
+                             "setup.exe", "Start-Process", "Workload.VCTools",
+                             "VCTOOLS_PRESENT"]),
     ]:
         path = os.path.join(HERE, "ps", name)
         if not os.path.exists(path):
