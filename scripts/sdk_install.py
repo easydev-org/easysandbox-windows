@@ -249,6 +249,13 @@ def stage_install(port, user, password):
             break
         if state == "stopped":
             print("  installer finished without VCTools", flush=True)
+            # The status script includes the installer log when it has finished; print it,
+            # because a run that lasted nine minutes and installed nothing has its reason
+            # there and nowhere else.
+            for line in out.splitlines():
+                t = line.strip()
+                if any(t.startswith(p) for p in ("--- ", "  ", "free on C:", "no installer log")):
+                    print("  " + t[:150], flush=True)
             break
 
     return stage_verify(port, user, password)
@@ -391,7 +398,7 @@ def selftest():
         ("vs-start.ps1", ["aka.ms/vs/17/release/vs_BuildTools.exe",
                           "Start-Process", "Workload.VCTools"]),
         ("vs-status.ps1", ["Installer" + bslash + "vswhere.exe",
-                           "INSTALL_RUNNING", "VCTOOLS_PRESENT"]),
+                           "INSTALL_RUNNING", "VCTOOLS_PRESENT", "free on C:"]),
     ]:
         path = os.path.join(HERE, "ps", name)
         if not os.path.exists(path):
