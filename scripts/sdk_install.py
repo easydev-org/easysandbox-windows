@@ -179,10 +179,16 @@ def stage_install(port, user, password):
             # --override replaces winget own switch set, so --accept-package-agreements cannot
             # be alongside it. A BATCH FILE keeps the switch string out of the
             # ssh -> cmd.exe -> winget chain, where the quotes were being eaten.
+            #
+            # extra is a list: ["--override", "--quiet --wait ... --add ..."]. The override
+            # value is one argument, so it is quoted once here and the whole line is written
+            # to the file exactly as winget will read it.
+            override_value = extra[1] if len(extra) > 1 else ""
             script = ("@echo off" + chr(13) + chr(10)
                       + " ".join(base)
                       + " --accept-source-agreements --disable-interactivity"
-                      + " --override " + chr(34) + extra + chr(34) + chr(13) + chr(10))
+                      + " --override " + chr(34) + override_value + chr(34)
+                      + chr(13) + chr(10))
             remote = "C:/Users/%s/install-%s.bat" % (user, pid.replace(".", "-"))
             fd, local = tempfile.mkstemp(suffix=".bat")
             with os.fdopen(fd, "w", newline="") as f:
