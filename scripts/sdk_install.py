@@ -43,15 +43,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # accepted by the switches passed TO the override string instead, which is what the installer
 # itself understands.
 PACKAGES = [
-    # ORDER MATTERS. PowerShell 7 goes last: its MSI restarts something that drops the SSH
-    # session, and while it ran in the middle every package after it failed with
-    # Connection refused - which reads as a dead machine rather than a restarting service.
-    #
-    # Ids read from microsoft/winget-pkgs manifests, not inferred from folder names:
-    # Microsoft.WindowsSDK.10.0.26100 carries its build number, Microsoft.PowerShell does not.
-    ("Microsoft.VisualStudio.2022.BuildTools",
-     None,
-     "installed bare, then given VCTools with setup.exe install"),
+    # BuildTools is NOT here. winget pins 17.9.7, whose manifest caps the supported OS at
+    # 10.0.22000; this guest is 10.0.26200, so the installer marks every component
+    # "not applicable", installs nothing and exits 1. It is installed instead by the
+    # evergreen bootstrapper in ps/vs-workload.ps1, which fetches a manifest that knows
+    # about current builds. Adding both would give two installers of the same product.
     ("Microsoft.WindowsSDK.10.0.26100", None, "the SDK on its own"),
     ("Microsoft.DotNet.SDK.10", None, "the .NET SDK, which VCTools does not include"),
     ("Microsoft.PowerShell", None,
@@ -252,6 +248,11 @@ def stage_verify(port, user, password):
         print("  %-45s %s" % (pid, "installed" if present else "MISSING"), flush=True)
         if not present:
             failures.append(pid)
+
+    # BuildTools is checked by asking vswhere, not winget: it is installed by the evergreen
+    # bootstrapper, so winget may not list it at all, and what matters is whether the product
+    # and its VCTools workload exist.
+    print("  %-45s %s" % ("Visual Studio BuildTools + VCTools", "checking..."), flush=True)
 
     # pwsh is the PowerShell 7 binary; Windows PowerShell 5.1 is powershell.exe. Checking the
     # executable rather than only the winget entry, because 'installed' and 'runs' differ.
