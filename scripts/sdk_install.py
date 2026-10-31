@@ -363,7 +363,7 @@ def selftest():
         ("msvc-check.ps1", ["Installer" + bslash + "vswhere.exe",
                             "Build" + bslash + "vcvars64.bat", "hello-from-msvc"]),
         ("vs-workload.ps1", ["Installer" + bslash + "vswhere.exe",
-                             "setup.exe", "Start-Process", "Workload.VCTools",
+                             "aka.ms/vs/17/release/vs_BuildTools.exe", "Start-Process", "Workload.VCTools",
                              "VCTOOLS_PRESENT"]),
     ]:
         path = os.path.join(HERE, "ps", name)

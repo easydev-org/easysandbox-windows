@@ -19,22 +19,14 @@ $ErrorActionPreference = 'Continue'
 $boot = Join-Path $env:TEMP 'vs_BuildTools.exe'
 Write-Output ('OS build: ' + [System.Environment]::OSVersion.Version.ToString())
 
-# Remove any BuildTools that winget installed, so the new bootstrapper starts clean rather
-# than trying to modify a product built from a stale manifest.
-$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-if (Test-Path $vswhere) {
-    $existing = & $vswhere -latest -products * -property installationPath 2>$null
-    if ($existing) {
-        Write-Output ('removing stale install at ' + $existing)
-        $setup = Join-Path (Split-Path $vswhere) 'setup.exe'
-        if (Test-Path $setup) {
-            $u = Start-Process -FilePath $setup -ArgumentList @(
-                'uninstall','--installPath',$existing,'--quiet','--norestart') -PassThru -Wait
-            Write-Output ('uninstall exit: ' + $u.ExitCode)
-        }
-    }
-}
+# NOTHING TO UNINSTALL. Every run starts from the ssh-latest disk pulled from ghcr, which
+# carries sshd and nothing else - the packages installed here live only in this run VM and
+# are thrown away with it. An earlier version of this script tried to remove a winget
+# BuildTools first; there is never one to remove on a fresh disk, and if there were, the
+# bootstrapper would handle it as an upgrade.
 
+
+$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 Write-Output 'downloading vs_BuildTools.exe (evergreen)'
 try {
     Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vs_BuildTools.exe' -OutFile $boot -UseBasicParsing -TimeoutSec 300
