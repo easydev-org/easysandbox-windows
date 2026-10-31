@@ -25,7 +25,7 @@ $args = @(
     '--installPath', $path,
     '--add', 'Microsoft.VisualStudio.Workload.VCTools',
     '--includeRecommended',
-    '--quiet', '--norestart', '--wait'
+    '--quiet', '--norestart'
 )
 Write-Output ('args: ' + ($args -join ' '))
 $p = Start-Process -FilePath $setup -ArgumentList $args -PassThru -Wait

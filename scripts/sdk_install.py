@@ -24,6 +24,7 @@ will wait forever in a non-interactive session.
 """
 import argparse
 import os
+import re
 import sys
 import tempfile
 
@@ -248,11 +249,15 @@ def stage_verify(port, user, password):
     print("--- pwsh ---", flush=True)
     r = ssh_run(port, user, password, "pwsh -v", timeout=300)
     pwsh_out = ((r.out or "") + (r.err or "")).strip()
-    version_line = pwsh_out.splitlines()[-1].strip() if pwsh_out else ""
-    print("  %s" % (version_line[:60] or "(no output)"), flush=True)
-    if version_line[:1].isdigit():
-        print("  PowerShell %s" % version_line, flush=True)
-    else:
+    # Search the whole output for the same reason as dotnet: ssh host-key warnings arrive
+    # after the real answer. pwsh -v prints "PowerShell 7.6.9", not a bare version number.
+    found = None
+    for line in pwsh_out.splitlines():
+        if re.search(r"PowerShell [0-9]+[.][0-9]+", line):
+            found = line.strip()
+            break
+    print("  %s" % (found or "(no version in output)"), flush=True)
+    if not found:
         failures.append("pwsh")
 
     # FULL PATH, because winget does not refresh PATH for sessions that already exist. The
@@ -261,10 +266,19 @@ def stage_verify(port, user, password):
     print("--- dotnet ---", flush=True)
     dotnet = ("C:" + chr(92) + "Program Files" + chr(92) + "dotnet" + chr(92) + "dotnet.exe")
     r = ssh_run(port, user, password, '"' + dotnet + '" --version', timeout=300)
+    # SEARCH THE WHOLE OUTPUT, not the last line. ssh writes its host-key warning to stderr,
+    # r.err and r.out are concatenated, and the warning therefore arrives after the version -
+    # so looking at the last line reported 10.0.403 as a failure on the run that proved it
+    # worked.
     out = ((r.out or "") + (r.err or "")).strip()
-    last = out.splitlines()[-1].strip() if out else ""
-    print("  %s" % (last[:90] or "(no output)"), flush=True)
-    if not last[:1].isdigit():
+    version = None
+    for line in out.splitlines():
+        t = line.strip()
+        if re.match(r"^[0-9]+[.][0-9]+[.][0-9]+", t):
+            version = t
+            break
+    print("  %s" % (version or "(no version in output)"), flush=True)
+    if not version:
         failures.append("dotnet")
 
     print("--- compile and run a program with MSVC ---", flush=True)
