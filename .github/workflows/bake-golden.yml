@@ -88,7 +88,9 @@ jobs:
           set -x
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc                       /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
           sudo rm -rf /opt/hostedtoolcache/CodeQL || true
-          sudo docker image prune -af || true
+          # Bounded. A prune that has nothing new to remove can still spend ten minutes
+          # talking to the daemon, and this step blocked a run for 984 seconds without it.
+          timeout 120 sudo docker image prune -af 2>/dev/null || echo "  prune skipped"
           sudo apt-get clean || true
           df -h / "" || true
       - name: bake prepare
