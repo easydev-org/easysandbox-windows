@@ -1,50 +1,57 @@
-# Add the VCTools workload, and report WHY if the installer refuses.
+# Diagnose why setup.exe refuses the modify.
 #
-# Four attempts have been read from the exit code alone:
-#   vs_installer modify  -> 0 in 4s (a launcher; nothing installed)
-#   setup --wait         -> 87 (--wait is the launcher switch, not setup.exe)
-#   setup, no --wait     -> 1 in a second
-#   setup, cleaned args  -> 1 in a second
-#
-# Each time I guessed at the next switch combination. The installer writes a log that says
-# what it objected to, and it has been sitting at a path printed in every run. So this prints
-# the tail of that log instead of guessing a fifth time.
+# The previous attempt printed the log path and nothing else, because the glob
+# dd_setup_*.log matched a file whose content had no line containing Error or VCTools - or
+# the file was the wrong one. So: list every dd_* file with its size, print the tail of the
+# newest, and ask the installer what products it knows about.
 $ErrorActionPreference = 'Continue'
 
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-if (-not (Test-Path $vswhere)) { Write-Output 'NO_VSWHERE'; exit 1 }
-
 $path = & $vswhere -latest -products * -property installationPath
 $setup = Join-Path (Split-Path $vswhere) 'setup.exe'
-Write-Output ("install path: " + $path)
 
-$args = @(
-    'modify',
-    '--installPath', $path,
-    '--add', 'Microsoft.VisualStudio.Workload.VCTools',
-    '--includeRecommended',
-    '--quiet', '--norestart'
-)
-Write-Output ('args: ' + ($args -join ' '))
+Write-Output '--- installer files ---'
+Get-ChildItem (Join-Path $env:TEMP 'dd_*') -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 8 |
+    ForEach-Object { Write-Output ('  ' + $_.LastWriteTime.ToString('HH:mm:ss') + '  ' + $_.Length + '  ' + $_.Name) }
+
+Write-Output '--- products the installer knows ---'
+$boot = Join-Path (Split-Path $vswhere) '..\..\..\..\ProgramData\Microsoft\VisualStudio\Packages\_Instances'
+Get-ChildItem $boot -ErrorAction SilentlyContinue | ForEach-Object { Write-Output ('  instance: ' + $_.Name) }
+
+Write-Output '--- channel manifest ---'
+$state = Join-Path $path '..\..\..\ProgramData\Microsoft\VisualStudio\Packages\_Instances'
+$ch = Get-ChildItem $state -Recurse -Filter 'state.json' -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($ch) {
+    $j = Get-Content $ch.FullName -Raw | ConvertFrom-Json
+    Write-Output ('  channelId:   ' + $j.channelId)
+    Write-Output ('  installPath: ' + $j.installationPath)
+    Write-Output ('  productId:   ' + $j.product.id)
+    Write-Output ('  nickname:    ' + $j.product.nickname)
+} else {
+    Write-Output '  no state.json found'
+}
+
+Write-Output '--- setup.exe modify, verbose ---'
+$args = @('modify', '--installPath', $path,
+          '--add', 'Microsoft.VisualStudio.Workload.VCTools', '--includeRecommended',
+          '--quiet', '--norestart')
 $p = Start-Process -FilePath $setup -ArgumentList $args -PassThru -Wait
-Write-Output ("setup exit: " + $p.ExitCode)
+Write-Output ('setup exit: ' + $p.ExitCode)
+
+Write-Output '--- newest log, last 20 lines ---'
+$log = Get-ChildItem (Join-Path $env:TEMP 'dd_*') -ErrorAction SilentlyContinue |
+    Where-Object { -not $_.PSIsContainer } |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if ($log) {
+    Write-Output ('  ' + $log.Name)
+    Get-Content $log.FullName -Tail 20 -ErrorAction SilentlyContinue |
+        ForEach-Object { Write-Output ('    ' + $_) }
+}
 
 $pkgs = & $vswhere -latest -products * -property packages 2>$null
 if ($pkgs -and ($pkgs -match 'Microsoft.VisualStudio.Workload.VCTools')) {
     Write-Output 'VCTOOLS_PRESENT'
 } else {
     Write-Output 'VCTOOLS_ABSENT'
-}
-
-# WHY. The newest installer log, and the lines that mention an error or the workload.
-$log = Get-ChildItem (Join-Path $env:TEMP 'dd_setup_*.log') -ErrorAction SilentlyContinue |
-    Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if ($log) {
-    Write-Output ('--- log: ' + $log.FullName + ' ---')
-    Get-Content $log.FullName -ErrorAction SilentlyContinue |
-        Where-Object { $_ -match 'Error|error|VCTools|invalid|Invalid|return code|Exit code' } |
-        Select-Object -Last 25 |
-        ForEach-Object { Write-Output ('  ' + $_) }
-} else {
-    Write-Output 'no dd_setup log found'
 }
