@@ -11,7 +11,7 @@ $ErrorActionPreference = 'Continue'
 
 $before = (Get-PSDrive C -ErrorAction SilentlyContinue).Used
 Write-Output ("=== clean ===")
-Write-Output ("used before: " + [math]::Round($before/1GB,2) + " GB")
+Write-Output ("used before: " + [math]::Round($before/1MB,0) + " MB")
 
 function Report($what, $path) {
     if ($path -and (Test-Path $path)) {
@@ -46,11 +46,20 @@ Get-ChildItem (Join-Path $env:SystemRoot "Temp") -Force -ErrorAction SilentlyCon
 # 3. winget download cache. The installed packages stay; only the downloaded installers go.
 Write-Output "--- winget cache ---"
 Get-ChildItem (Join-Path $env:LOCALAPPDATA "Packages") -Directory -Filter "Microsoft.DesktopAppInstaller_*" -ErrorAction SilentlyContinue | ForEach-Object {
-    foreach ($sub in @("LocalState\Temp", "LocalState\DownloadedInstallers", "LocalState\Manifests")) {
-        $p = Join-Path $_.FullName $sub
+    # $_ is the package directory here; an inner pipeline would overwrite it, so this is
+    # kept as a separate variable and the inner loops use $sub and $_.
+    $pkg = $_
+    Write-Output ("  " + $pkg.Name)
+    $ls = Join-Path $pkg.FullName "LocalState"
+    if (Test-Path $ls) {
+        Get-ChildItem $ls -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Output ("    " + $_.Name) }
+    }
+    foreach ($sub in @("Temp", "DownloadedInstallers", "Manifests")) {
+        $p = Join-Path $ls $sub
         if (Test-Path $p) {
             $sz = (Get-ChildItem $p -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-            Write-Output ("  " + $sub + ": " + [math]::Round(($sz/1MB),1) + " MB")
+            $mb = [math]::Round(($sz/1MB),1)
+            Write-Output ("    removing " + $sub + ": " + $mb + " MB")
             Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
@@ -77,7 +86,15 @@ Write-Output "  recent items and jump lists cleared"
 
 # 7. Recycle bin.
 Write-Output "--- recycle bin ---"
-try { Clear-RecycleBin -Force -ErrorAction Stop; Write-Output "  emptied" } catch { Write-Output ("  " + $_.Exception.Message) }
+foreach ($dl in @("C")) {
+    try {
+        Clear-RecycleBin -DriveLetter $dl -Force -ErrorAction Stop
+        Write-Output ("  emptied " + $dl + ": ")
+    } catch {
+        # An empty recycle bin raises this; that is not a failure.
+        Write-Output ("  " + $dl + ": " + $_.Exception.Message)
+    }
+}
 
 # 8. Event logs. Cleared last, and each log is only cleared if it will clear - some are
 # locked while a service holds them.
@@ -95,6 +112,6 @@ if (Test-Path $kh) { Remove-Item $kh -Force -ErrorAction SilentlyContinue; Write
 cmdkey /list 2>$null | Select-String "Target:" | ForEach-Object { Write-Output ("  credential: " + $_.Line) }
 
 $after = (Get-PSDrive C -ErrorAction SilentlyContinue).Used
-Write-Output ("used after:  " + [math]::Round($after/1GB,2) + " GB")
-Write-Output ("freed:        " + [math]::Round(($before - $after)/1GB,2) + " GB")
+Write-Output ("used after:  " + [math]::Round($after/1MB,0) + " MB")
+Write-Output ("freed:        " + [math]::Round(($before - $after)/1MB,1) + " MB")
 Write-Output "CLEAN_DONE"
