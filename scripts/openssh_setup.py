@@ -471,6 +471,20 @@ def stage_analyze(args):
     for mb, name in ls("C:/ProgramData"):
         print("  %9.1f MB  %s" % (mb, name), flush=True)
 
+    # Program Files (x86):\Microsoft is 8.2 GB, more than the whole Visual Studio folder.
+    # That is where the answer is, so open it and its largest child.
+    print("=== C:/Program Files (x86)/Microsoft, by subdirectory ===", flush=True)
+    for mb, name in ls("C:/Program Files (x86)/Microsoft"):
+        print("  %9.1f MB  %s" % (mb, name), flush=True)
+
+    print("=== C:/Program Files (x86)/Microsoft/Visual Studio, by subdirectory ===", flush=True)
+    for mb, name in ls("C:/Program Files (x86)/Microsoft/Visual Studio"):
+        print("  %9.1f MB  %s" % (mb, name), flush=True)
+
+    print("=== C:/ProgramData/Microsoft, by subdirectory ===", flush=True)
+    for mb, name in ls("C:/ProgramData/Microsoft"):
+        print("  %9.1f MB  %s" % (mb, name), flush=True)
+
     print("analysis done", flush=True)
     return 0
 
