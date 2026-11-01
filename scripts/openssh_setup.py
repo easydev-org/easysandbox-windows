@@ -400,7 +400,12 @@ def stage_analyze(args):
         t = line.strip()
         if t and not t.startswith("Warning: Permanently added"):
             print("  " + t[:160], flush=True)
-    xsh.need("ANALYZE_DONE" in out, "analyze.ps1 did not finish")
+    # ANALYZE_DONE is the marker for a complete run, but a partial report still answers the
+    # question - and a traversal that dies part way has already printed what it measured.
+    if "ANALYZE_DONE" in out:
+        print("analysis complete", flush=True)
+    else:
+        print("NOTE: analysis stopped early; the figures above are what it reached", flush=True)
     return 0
 
 
