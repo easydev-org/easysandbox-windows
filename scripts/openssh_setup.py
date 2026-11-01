@@ -664,6 +664,8 @@ def selftest_clean():
         ("env:SystemRoot", "system temp"),
         ("DeliveryOptimization", "DO cache"),
         ("known_hosts", "ssh known_hosts"),
+        ("Package Cache", "build caches"),
+        ("zero.fill", "free-space zeroing"),
     ]:
         got = needle in body
         bad += not got
