@@ -95,7 +95,9 @@ Write-Output "--- recycle bin ---"
 # Clear-RecycleBin cannot resolve a bin in a non-interactive ssh session - it answers
 # "The system cannot find the path specified" whatever -DriveLetter is given. Deleting the
 # contents of $Recycle.Bin directly does the same job and needs no shell folder.
-$rb = "$env:SystemDrive\$Recycle.Bin"
+# $Recycle is a variable name to PowerShell, so the path is concatenated
+# rather than interpolated: the quoted form expanded to ".Bin" and matched nothing.
+$rb = $env:SystemDrive + '\$Recycle.Bin'
 if (Test-Path $rb) {
     $n = 0
     Get-ChildItem $rb -Force -ErrorAction SilentlyContinue | ForEach-Object {
@@ -107,7 +109,7 @@ if (Test-Path $rb) {
     }
     Write-Output ("  emptied (removed " + $n + " items from " + $rb + ")")
 } else {
-    Write-Output "  no $Recycle.Bin on this drive"
+    Write-Output ("  no " + $rb + " on this drive")
 }
 
 # 8. Event logs. Cleared last, and each log is only cleared if it will clear - some are
@@ -136,51 +138,32 @@ Write-Output ("  cleared " + $cleared + " logs")
     ($env:SystemRoot + '\Installer\$PatchCache$')
  )) {
      if (Test-Path $p) {
-         $mb = (Get-ChildItem $p -Recurse -Force -ErrorAction SilentlyContinue |
-                Measure-Object -Property Length -Sum).Sum
-         if ($mb) { Write-Output ("  " + [math]::Round($mb/1MB,1) + " MB  " + $p) }
+         # Measure-Object throws when the input is empty; with ErrorActionPreference Continue
+         # that still printed an error and the delete below never ran, so a cache folder that
+         # was already empty aborted the rest of the list.
+         $files = @(Get-ChildItem $p -Recurse -Force -File -ErrorAction SilentlyContinue)
+         if ($files.Count -gt 0) {
+             $mb = ($files | Measure-Object -Property Length -Sum).Sum
+             Write-Output ("  " + [math]::Round($mb/1MB,1) + " MB  " + $p)
+         } else {
+             Write-Output ("  0 MB  " + $p)
+         }
          Get-ChildItem $p -Force -ErrorAction SilentlyContinue |
              ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+         Write-Output "    removed contents"
      }
  }
 
-# 10. ZERO THE FREE SPACE, or none of the above changes the size of the image.
+# 10. Free space is zeroed by a SEPARATE SCRIPT, and stage_clean runs it and polls.
 #
-# export runs qemu-img convert -O qcow2 over the raw disk, and qcow2 only skips clusters that
-# are already zero. Deleting a file in NTFS marks its clusters free but leaves the bytes in
-# place, so convert still has to store them and the qcow2 comes out the same size. Writing
-# zeros over the free space is what actually makes it smaller.
+# export runs qemu-img convert -O qcow2 over the raw disk, and qcow2 skips only clusters that
+# are already zero. NTFS marks deleted clusters free but leaves the bytes, so convert stores
+# them and the image comes out the same size - which is why the earlier cleans reported
+# "freed: 1100 MB" and published an unchanged 21.5 GiB.
 #
-# Slower and kinder than sdelete -c: a file grown to fill the disk with zero writes, then
-# deleted, so the clusters are genuinely zero when convert looks at them.
- Write-Output "--- zeroing free space ---"
- $zeroStart = Get-Date
- $free = (Get-PSDrive C -ErrorAction SilentlyContinue).Free
- Write-Output ("  free before: " + [math]::Round($free/1GB,2) + " GB")
- if ($free -gt 500MB) {
-     $tmp = Join-Path $env:SystemDrive "zero.fill"
-     try {
-         $fs = [System.IO.File]::Create($tmp)
-         $buf = New-Object byte[] (4MB)
-         $written = 0
-         $limit = $free - 200MB
-         while ($written -lt $limit) {
-             $fs.Write($buf, 0, $buf.Length)
-             $written += $buf.Length
-         }
-         $fs.Close()
-         Write-Output ("  wrote " + [math]::Round($written/1GB,2) + " GB of zeros")
-     } catch {
-         Write-Output ("  stopped at " + [math]::Round($written/1GB,2) + " GB: " + $_.Exception.Message)
-     } finally {
-         Remove-Item $tmp -Force -ErrorAction SilentlyContinue
-     }
- } else {
-     Write-Output "  not enough free space to bother"
- }
- Write-Output ("  took " + [int]((Get-Date) - $zeroStart).TotalSeconds + "s")
-
-# 11. The ssh known_hosts entries this pipeline wrote, and any saved credentials.
+# It is not done here because filling 35 GB takes tens of minutes and this script runs under
+# a single ssh call that would not survive it. zero.ps1 does the work, writes a marker when
+# it is done, and stage_clean starts it detached and asks for progress.
 Write-Output "--- ssh and credentials ---"
 $kh = Join-Path $env:USERPROFILE ".ssh\known_hosts"
 if (Test-Path $kh) { Remove-Item $kh -Force -ErrorAction SilentlyContinue; Write-Output "  known_hosts removed" } else { Write-Output "  known_hosts absent" }

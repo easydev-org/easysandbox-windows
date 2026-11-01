@@ -371,6 +371,50 @@ def stage_clean(args):
     # DO NOT TAKE SILENCE FOR SUCCESS. The script ends with CLEAN_DONE; without that marker
     # the step failed and the disk still carries whatever was left.
     xsh.need("CLEAN_DONE" in out, "clean.ps1 did not report completion")
+    # ZERO THE FREE SPACE, detached, then wait for the marker.
+    #
+    # The cleaning above does not change the size of the published image on its own: export
+    # runs qemu-img convert -O qcow2, and qcow2 skips only clusters that are already zero.
+    # NTFS leaves the bytes of a deleted file where they were, so convert stores them again.
+    # Filling the free space with zeros is what makes the deletions count - and it takes tens
+    # of minutes for about 35 GB, which no single ssh call survives.
+    #
+    # All three scripts are files copied up and run by path. Inline commands were mangled twice
+    # on the way through ssh and cmd - shell variables were expanded before they arrived.
+    for name in ("zero.ps1", "zero-start.ps1", "zero-status.ps1"):
+        lp = os.path.join(HERE, "ps", name)
+        rp = "C:/Users/%s/%s" % (args.user, name)
+        r = xsh.run(["sshpass", "-p", args.password, "scp",
+                     "-o", "StrictHostKeyChecking=no",
+                     "-o", "UserKnownHostsFile=/dev/null",
+                     "-P", str(args.port), lp, "%s@127.0.0.1:%s" % (args.user, rp)],
+                    echo=False, timeout=300)
+        xsh.need(r.ok, "could not copy %s: %s" % (name, r.err or r.out))
+
+    ssh_run(args.port, args.user, args.password,
+            "powershell -NoProfile -ExecutionPolicy Bypass -File "
+            "C:/Users/%s/zero-start.ps1" % args.user, timeout=120)
+    print("=== zeroing free space (detached) ===", flush=True)
+
+    deadline = time.time() + 3600
+    last = ""
+    finished = False
+    while time.time() < deadline:
+        time.sleep(30)
+        r = ssh_run(args.port, args.user, args.password,
+                    "powershell -NoProfile -ExecutionPolicy Bypass -File "
+                    "C:/Users/%s/zero-status.ps1" % args.user, timeout=180)
+        out = ((r.out or "") + (r.err or "")).strip().splitlines()
+        line = out[-1].strip() if out else ""
+        if line and line != last:
+            print("  " + line[:100], flush=True)
+            last = line
+        if "written=" in out:
+            finished = True
+            break
+    if not finished:
+        print("  zeroing did not finish within the hour; exporting anyway", flush=True)
+
     print("clean complete", flush=True)
     return 0
 
@@ -647,12 +691,31 @@ def selftest_clean():
     products. ProgramData\\Microsoft\\VisualStudio\\Packages is the payload cache a repair
     or update needs, and deleting it would produce a disk that looks clean and cannot update.
     """
+    bad = 0
+
+    # The zero-fill runs as its own detached script, so check those files too: a missing one
+    # means the step would fail after the cleaning had already been done.
+    for name, needles in [
+        ("zero.ps1", ["zero.fill", "zero.done", "File]::Create"]),
+        ("zero-start.ps1", ["Start-Process", "zero.ps1"]),
+        ("zero-status.ps1", ["zero.done", "zero.fill"]),
+    ]:
+        p = os.path.join(HERE, "ps", name)
+        if not os.path.exists(p):
+            print("  FAIL %s missing" % name)
+            bad += 1
+            continue
+        body = open(p).read()
+        for needle in needles:
+            got = needle in body
+            bad += not got
+            print("  %s %-16s %-14s -> %s" % ("ok " if got else "FAIL", name, needle[:14], got))
+
     path = os.path.join(HERE, "ps", "clean.ps1")
     if not os.path.exists(path):
         print("  FAIL clean.ps1 missing")
         return 1
     body = open(path).read()
-    bad = 0
     for needle, desc in [
         ("CLEAN_DONE", "completion marker"),
         ("Recycle.Bin", "recycle bin"),
@@ -665,7 +728,6 @@ def selftest_clean():
         ("DeliveryOptimization", "DO cache"),
         ("known_hosts", "ssh known_hosts"),
         ("Package Cache", "build caches"),
-        ("zero.fill", "free-space zeroing"),
     ]:
         got = needle in body
         bad += not got
