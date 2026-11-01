@@ -378,34 +378,59 @@ def stage_clean(args):
 def stage_analyze(args):
     """Read-only report of where the space on the guest disk went.
 
-    The published qcow2 is 21.5 GiB while the guest reports 28.8 GiB used. Both can be true -
-    qcow2 stores only non-zero clusters - but an image 9 GiB larger than its parent deserves
-    accounting for before it is called the toolchain. Nothing is deleted here.
+    ONE FOLDER PER SSH ROUND TRIP. Three earlier versions measured several folders in a single
+    script and the session died part way every time: sizing C:\\Windows means sizing WinSxS,
+    which holds tens of thousands of files, and the connection does not survive that walk.
+    A short call per folder means a slow folder costs only itself, and every figure printed is
+    a figure that was actually obtained.
+
+    Nothing is deleted here. The point is to see which of the 28.8 GB is the toolchain and
+    which is cache that a golden image should not be carrying.
     """
-    print("=== analysing the guest disk ===", flush=True)
-    local = os.path.join(HERE, "ps", "analyze.ps1")
-    remote = "C:/Users/%s/analyze.ps1" % args.user
+    local = os.path.join(HERE, "ps", "disksize.ps1")
+    remote = "C:/Users/%s/disksize.ps1" % args.user
     r = xsh.run(["sshpass", "-p", args.password, "scp",
                  "-o", "StrictHostKeyChecking=no",
                  "-o", "UserKnownHostsFile=/dev/null",
                  "-P", str(args.port), local, "%s@127.0.0.1:%s" % (args.user, remote)],
                 echo=False, timeout=300)
-    xsh.need(r.ok, "could not copy analyze.ps1: %s" % (r.err or r.out))
+    xsh.need(r.ok, "could not copy disksize.ps1: %s" % (r.err or r.out))
 
-    r = ssh_run(args.port, args.user, args.password,
-                "powershell -NoProfile -ExecutionPolicy Bypass -File " + remote,
-                timeout=3600)
-    out = (r.out or "") + (r.err or "")
-    for line in out.splitlines():
-        t = line.strip()
-        if t and not t.startswith("Warning: Permanently added"):
-            print("  " + t[:160], flush=True)
-    # ANALYZE_DONE is the marker for a complete run, but a partial report still answers the
-    # question - and a traversal that dies part way has already printed what it measured.
-    if "ANALYZE_DONE" in out:
-        print("analysis complete", flush=True)
-    else:
-        print("NOTE: analysis stopped early; the figures above are what it reached", flush=True)
+    def du(path):
+        r = ssh_run(args.port, args.user, args.password,
+                    'powershell -NoProfile -ExecutionPolicy Bypass -File %s -Path "%s"'
+                    % (remote, path), timeout=900)
+        out = ((r.out or "") + (r.err or "")).strip().splitlines()
+        val = out[-1].strip() if out else ""
+        if val == "ABSENT":
+            return "absent"
+        if val == "ERR" or not val:
+            return "walk failed"
+        return val + " MB"
+
+    print("=== analysing the guest disk ===", flush=True)
+
+    print("=== top level ===", flush=True)
+    for path in ["C:/Program Files", "C:/Program Files (x86)", "C:/ProgramData",
+                 "C:/Users", "C:/Windows"]:
+        print("  %-30s %s" % (path, du(path)), flush=True)
+
+    print("=== detail ===", flush=True)
+    for path in [
+        "C:/Program Files/Microsoft Visual Studio",
+        "C:/Program Files (x86)/Microsoft Visual Studio",
+        "C:/Program Files (x86)/Windows Kits",
+        "C:/Program Files/dotnet",
+        "C:/ProgramData/Microsoft/Visual Studio/Packages",
+        "C:/ProgramData/Package Cache",
+        "C:/Windows/WinSxS",
+        "C:/Windows/Installer",
+        "C:/Windows/SoftwareDistribution",
+        "C:/Windows/Temp",
+    ]:
+        print("  %-48s %s" % (path, du(path)), flush=True)
+
+    print("analysis done", flush=True)
     return 0
 
 
