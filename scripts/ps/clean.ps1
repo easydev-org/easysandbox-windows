@@ -69,6 +69,12 @@ Get-ChildItem (Join-Path $env:LOCALAPPDATA "Packages") -Directory -Filter "Micro
 Write-Output "--- delivery optimisation ---"
 $do = "$env:SystemRoot\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization"
 Report "DeliveryOptimization" $do
+if (Test-Path $do) {
+    Get-ChildItem $do -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Write-Output "  contents removed"
+}
 
 # 5. Shell history.
 Write-Output "--- history ---"
@@ -86,14 +92,22 @@ Write-Output "  recent items and jump lists cleared"
 
 # 7. Recycle bin.
 Write-Output "--- recycle bin ---"
-foreach ($dl in @("C")) {
-    try {
-        Clear-RecycleBin -DriveLetter $dl -Force -ErrorAction Stop
-        Write-Output ("  emptied " + $dl + ": ")
-    } catch {
-        # An empty recycle bin raises this; that is not a failure.
-        Write-Output ("  " + $dl + ": " + $_.Exception.Message)
+# Clear-RecycleBin cannot resolve a bin in a non-interactive ssh session - it answers
+# "The system cannot find the path specified" whatever -DriveLetter is given. Deleting the
+# contents of $Recycle.Bin directly does the same job and needs no shell folder.
+$rb = "$env:SystemDrive\$Recycle.Bin"
+if (Test-Path $rb) {
+    $n = 0
+    Get-ChildItem $rb -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        # $Recycle.Bin holds one folder per SID; leave nothing inside any of them.
+        Get-ChildItem $_.FullName -Force -ErrorAction SilentlyContinue | ForEach-Object {
+            Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            $n++
+        }
     }
+    Write-Output ("  emptied (removed " + $n + " items from " + $rb + ")")
+} else {
+    Write-Output "  no $Recycle.Bin on this drive"
 }
 
 # 8. Event logs. Cleared last, and each log is only cleared if it will clear - some are

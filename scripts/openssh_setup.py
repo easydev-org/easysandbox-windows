@@ -541,7 +541,7 @@ def selftest_clean():
     bad = 0
     for needle, desc in [
         ("CLEAN_DONE", "completion marker"),
-        ("Clear-RecycleBin", "recycle bin"),
+        ("Recycle.Bin", "recycle bin"),
         ("wevtutil cl", "event logs"),
         ("ConsoleHost_history", "shell history"),
         ("RunMRU", "run dialog"),
