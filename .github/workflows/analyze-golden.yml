@@ -1,0 +1,116 @@
+name: analyze-golden
+
+# Read-only: boot a golden disk and report where its space went. Nothing is exported.
+#
+# WHY. The published qcow2 is 21.5 GiB while the guest reports 28.8 GiB used, and it is
+# 9 GiB larger than the disk it was built from. Those numbers can all be true, but before
+# calling the difference "the toolchain" it is worth knowing which folders hold it -
+# installers left behind, a Visual Studio payload cache, WinSxS, the installer cache, or
+# genuinely the compilers.
+#
+# No export, no publish, no writes to the guest.
+on:
+  workflow_dispatch:
+    inputs:
+      pull_tag:
+        description: ghcr tag under easysandbox-windows-golden to analyse
+        required: false
+        default: dev-latest
+      bootstate_run:
+        description: Run id holding the bootstate artifact for that disk
+        required: false
+        default: ''
+      port:
+        description: sshd port
+        required: false
+        default: "2222"
+      boot_wait:
+        description: Seconds to wait for the desktop
+        required: false
+        default: "1800"
+
+permissions:
+  contents: read
+  actions: read
+  checks: write
+  packages: read
+
+concurrency:
+  group: analyze-golden
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-utils tesseract-ocr sshpass
+
+      - name: parser selftest
+        run: python3 scripts/openssh_setup.py selftest
+
+      - name: free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" /opt/hostedtoolcache/CodeQL || true
+          timeout 120 sudo docker image prune -af 2>/dev/null || echo prune-skipped
+          df -h / | tail -1
+
+      - uses: actions/download-artifact@v4
+        if: ${{ github.event.inputs.bootstate_run != '' }}
+        continue-on-error: true
+        with:
+          name: golden-windows-dev-bootstate
+          path: artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.inputs.bootstate_run }}
+
+      - name: place the disk
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python3 scripts/openssh_setup.py place
+          --pull-repo easysandbox-windows-golden
+          --pull-tag ${{ github.event.inputs.pull_tag }}
+
+      - name: boot and wait for the desktop
+        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: analyze-boot
+          interval: "20"
+          command: >-
+            python3 scripts/openssh_setup.py boot
+            --container analyzedisk --port ${{ github.event.inputs.port }}
+            --wait ${{ github.event.inputs.boot_wait }}
+
+      - name: expose the port
+        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: analyze-forward
+          interval: "15"
+          command: >-
+            python3 scripts/openssh_setup.py forward
+            --container analyzedisk --port ${{ github.event.inputs.port }}
+
+      - name: analyse the disk
+        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: analyze-disk
+          interval: "20"
+          command: >-
+            python3 scripts/openssh_setup.py analyze
+            --port ${{ github.event.inputs.port }}
+            --user docker --password admin
+
+      - name: stop
+        if: always()
+        run: docker rm -f analyzedisk || true

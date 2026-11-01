@@ -375,6 +375,35 @@ def stage_clean(args):
     return 0
 
 
+def stage_analyze(args):
+    """Read-only report of where the space on the guest disk went.
+
+    The published qcow2 is 21.5 GiB while the guest reports 28.8 GiB used. Both can be true -
+    qcow2 stores only non-zero clusters - but an image 9 GiB larger than its parent deserves
+    accounting for before it is called the toolchain. Nothing is deleted here.
+    """
+    print("=== analysing the guest disk ===", flush=True)
+    local = os.path.join(HERE, "ps", "analyze.ps1")
+    remote = "C:/Users/%s/analyze.ps1" % args.user
+    r = xsh.run(["sshpass", "-p", args.password, "scp",
+                 "-o", "StrictHostKeyChecking=no",
+                 "-o", "UserKnownHostsFile=/dev/null",
+                 "-P", str(args.port), local, "%s@127.0.0.1:%s" % (args.user, remote)],
+                echo=False, timeout=300)
+    xsh.need(r.ok, "could not copy analyze.ps1: %s" % (r.err or r.out))
+
+    r = ssh_run(args.port, args.user, args.password,
+                "powershell -NoProfile -ExecutionPolicy Bypass -File " + remote,
+                timeout=3600)
+    out = (r.out or "") + (r.err or "")
+    for line in out.splitlines():
+        t = line.strip()
+        if t and not t.startswith("Warning: Permanently added"):
+            print("  " + t[:160], flush=True)
+    xsh.need("ANALYZE_DONE" in out, "analyze.ps1 did not finish")
+    return 0
+
+
 def stage_export(args):
     """Stop the guest and take the disk out, as qcow2, with the state files it needs.
 
@@ -579,7 +608,7 @@ def main(argv=None):
     argv = argv if argv is not None else sys.argv[1:]
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("stage", choices=["disk", "place", "boot", "install", "forward",
-                                      "verify", "clean", "export", "publish", "selftest"])
+                                      "verify", "clean", "analyze", "export", "publish", "selftest"])
     ap.add_argument("--container", default="sshinst")
     ap.add_argument("--port", type=int, default=2222)
     ap.add_argument("--user", default="docker")
@@ -616,6 +645,7 @@ def main(argv=None):
         "forward": stage_forward,
         "verify": stage_verify,
         "clean": stage_clean,
+        "analyze": stage_analyze,
         "export": stage_export,
         "publish": stage_publish,
     }[args.stage](args)
