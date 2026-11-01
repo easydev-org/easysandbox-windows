@@ -402,11 +402,42 @@ def stage_analyze(args):
                     % (remote, path), timeout=900)
         out = ((r.out or "") + (r.err or "")).strip().splitlines()
         val = out[-1].strip() if out else ""
-        if val == "ABSENT":
-            return "absent"
-        if val == "ERR" or not val:
-            return "walk failed"
-        return val + " MB"
+        # ssh writes its host-key warning to stderr and it lands after the number, so the last
+        # line is often the warning rather than the answer. Take the last line that looks like
+        # one of the three things the script prints.
+        for candidate in reversed(out):
+            c = candidate.strip()
+            if c == "ABSENT":
+                return "absent"
+            if c == "ERR":
+                return "walk failed"
+            try:
+                return str(float(c)) + " MB"
+            except ValueError:
+                continue
+        return "walk failed"
+
+    def ls(path):
+        """Every immediate subdirectory of path, as (MB, name), largest first.
+
+        Used to open up a folder that is much larger than the parts already named inside it.
+        """
+        r = ssh_run(args.port, args.user, args.password,
+                    'powershell -NoProfile -ExecutionPolicy Bypass -File %s -Path "%s" -List'
+                    % (remote, path), timeout=1800)
+        out = ((r.out or "") + (r.err or "")).strip().splitlines()
+        rows = []
+        for line in out:
+            t = line.strip()
+            if "|" not in t:
+                continue
+            mb, _, name = t.partition("|")
+            try:
+                rows.append((float(mb), name))
+            except ValueError:
+                continue
+        rows.sort(reverse=True)
+        return rows
 
     print("=== analysing the guest disk ===", flush=True)
 
@@ -429,6 +460,16 @@ def stage_analyze(args):
         "C:/Windows/Temp",
     ]:
         print("  %-48s %s" % (path, du(path)), flush=True)
+
+    # The summary said Program Files (x86) holds 13.5 GB while the parts named inside it - VS
+    # at 3.6 and Windows Kits at 1.7 - account for about 5.3. Open it up instead of guessing.
+    print("=== C:/Program Files (x86), by subdirectory ===", flush=True)
+    for mb, name in ls("C:/Program Files (x86)"):
+        print("  %9.1f MB  %s" % (mb, name), flush=True)
+
+    print("=== C:/ProgramData, by subdirectory ===", flush=True)
+    for mb, name in ls("C:/ProgramData"):
+        print("  %9.1f MB  %s" % (mb, name), flush=True)
 
     print("analysis done", flush=True)
     return 0
