@@ -27,6 +27,8 @@ import openssh_forward
 import openssh_verify
 import xsh
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+
 
 # ---------------------------------------------------------------- stages
 
@@ -310,6 +312,47 @@ def stage_verify(args):
     )
 
 
+def stage_clean(args):
+    """Remove the traces this pipeline leaves inside the guest, before the disk is exported.
+
+    The disk is the deliverable, so anything the build put on it - downloaded installers,
+    extraction directories, a test program, my helper scripts, shell history, event logs -
+    travels with it and is visible to whoever receives the image.
+
+    Only caches, temp files, logs and history are removed. Installed products are untouched:
+    no Program Files, and not ProgramData\\Microsoft\\VisualStudio\\Packages, because that
+    payload cache is what makes a Visual Studio repair or update work.
+
+    The script is a file copied up and run by path, like every other one here, and it prints
+    what it found at each step - a cleaner that reports nothing is indistinguishable from one
+    that did nothing.
+    """
+    print("=== cleaning the guest ===", flush=True)
+    local = os.path.join(HERE, "ps", "clean.ps1")
+    remote = "C:/Users/%s/clean.ps1" % args.user
+    r = xsh.run(["sshpass", "-p", args.password, "scp",
+                 "-o", "StrictHostKeyChecking=no",
+                 "-o", "UserKnownHostsFile=/dev/null",
+                 "-P", str(args.port), local, "%s@127.0.0.1:%s" % (args.user, remote)],
+                echo=False, timeout=300)
+    xsh.need(r.ok, "could not copy clean.ps1: %s" % (r.err or r.out))
+
+    r = ssh_run(args.port, args.user, args.password,
+                "powershell -NoProfile -ExecutionPolicy Bypass -File " + remote,
+                timeout=1800)
+    out = (r.out or "") + (r.err or "")
+    for line in out.splitlines():
+        t = line.strip()
+        if t and not t.startswith("Warning: Permanently added"):
+            print("  " + t[:150], flush=True)
+
+    # DO NOT TAKE SILENCE FOR SUCCESS. The script ends with CLEAN_DONE; without that marker
+    # the step failed and the disk still carries whatever was left.
+    xsh.need("CLEAN_DONE" in out, "clean.ps1 did not report completion")
+    print("clean complete", flush=True)
+    return 0
+
+
 def stage_export(args):
     """Stop the guest and take the disk out, as qcow2, with the state files it needs.
 
@@ -457,6 +500,51 @@ def selftest_virtual_size():
     return 0 if bad == 0 else 1
 
 
+def selftest_clean():
+    """The cleaner is a data file, so what can be checked is its contract.
+
+    Two things matter and both are checkable without a VM:
+      it ends with CLEAN_DONE, so the caller can require completion rather than guess from
+        silence - a cleaner that reports nothing looks identical to one that did nothing
+      it actually covers the categories that were asked for
+    And one thing matters that is easy to get wrong: it must NOT remove the installed
+    products. ProgramData\\Microsoft\\VisualStudio\\Packages is the payload cache a repair
+    or update needs, and deleting it would produce a disk that looks clean and cannot update.
+    """
+    path = os.path.join(HERE, "ps", "clean.ps1")
+    if not os.path.exists(path):
+        print("  FAIL clean.ps1 missing")
+        return 1
+    body = open(path).read()
+    bad = 0
+    for needle, desc in [
+        ("CLEAN_DONE", "completion marker"),
+        ("Clear-RecycleBin", "recycle bin"),
+        ("wevtutil cl", "event logs"),
+        ("ConsoleHost_history", "shell history"),
+        ("RunMRU", "run dialog"),
+        ("Recent", "recent items"),
+        ("env:TEMP", "user temp"),
+        ("env:SystemRoot", "system temp"),
+        ("DeliveryOptimization", "DO cache"),
+        ("known_hosts", "ssh known_hosts"),
+    ]:
+        got = needle in body
+        bad += not got
+        print("  %s clean %-22s -> %s" % ("ok " if got else "FAIL", desc, got))
+
+    # The payload cache must be mentioned only in the comment that says it is kept.
+    for line in body.splitlines():
+        s = line.strip()
+        if s.startswith("#") or not s:
+            continue
+        if "VisualStudio" + chr(92) + "Packages" in s:
+            print("  FAIL clean removes the VS payload cache")
+            bad += 1
+    print("  %s" % ("clean cases passed" if bad == 0 else "%d FAILED" % bad))
+    return 0 if bad == 0 else 1
+
+
 def _read_virtual_size(text):
     import re as _re
     m = _re.search(r"virtual size:[ ]*(?:[0-9.]+[ ]*[KMGT]iB[ ]*)?\(([0-9]+) bytes\)", text or "")
@@ -469,7 +557,7 @@ def main(argv=None):
     argv = argv if argv is not None else sys.argv[1:]
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("stage", choices=["disk", "place", "boot", "install", "forward",
-                                      "verify", "export", "publish", "selftest"])
+                                      "verify", "clean", "export", "publish", "selftest"])
     ap.add_argument("--container", default="sshinst")
     ap.add_argument("--port", type=int, default=2222)
     ap.add_argument("--user", default="docker")
@@ -495,6 +583,7 @@ def main(argv=None):
         rc = openssh_verify.main(["--selftest"])
         rc |= openssh_forward.main(["--selftest"])
         rc |= selftest_virtual_size()
+        rc |= selftest_clean()
         return rc
 
     return {
@@ -504,6 +593,7 @@ def main(argv=None):
         "install": stage_install,
         "forward": stage_forward,
         "verify": stage_verify,
+        "clean": stage_clean,
         "export": stage_export,
         "publish": stage_publish,
     }[args.stage](args)

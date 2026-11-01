@@ -1,0 +1,160 @@
+name: clean-golden
+
+# Strip the traces a build leaves from a golden disk, and publish the cleaned image.
+#
+# WHY THIS EXISTS. Every stage so far installs things and exports the disk. What it leaves
+# behind - downloaded installers, Visual Studio extraction directories, the test .c and .exe
+# from the compile check, my helper .ps1 files, PowerShell history, event logs, the recycle
+# bin - travels with the image and is visible to whoever receives it.
+#
+# The dev disk is 21.9 GiB against ssh 12.6; part of that difference is cache and temp.
+#
+# STAGES, same shape as the others: place the disk from ghcr, boot it, clean it over ssh,
+# export, publish. Nothing is installed, so no OCR and no typing.
+on:
+  workflow_dispatch:
+    inputs:
+      pull_tag:
+        description: ghcr tag under easysandbox-windows-golden to clean
+        required: false
+        default: dev-latest
+      bootstate_run:
+        description: Run id holding the bootstate artifact for that disk
+        required: false
+        default: ''
+      port:
+        description: sshd port
+        required: false
+        default: "2222"
+      boot_wait:
+        description: Seconds to wait for the desktop
+        required: false
+        default: "1800"
+      publish_tag:
+        description: Base tag to publish the cleaned disk under
+        required: false
+        default: dev
+      export_disk:
+        description: Export and publish the cleaned disk
+        required: false
+        default: yes
+
+permissions:
+  contents: read
+  actions: read
+  checks: write
+  packages: write
+
+concurrency:
+  group: clean-golden
+  cancel-in-progress: true
+
+jobs:
+  clean:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-utils tesseract-ocr sshpass
+
+      - name: parser selftest
+        run: python3 scripts/openssh_setup.py selftest
+
+      - name: free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" /opt/hostedtoolcache/CodeQL || true
+          timeout 120 sudo docker image prune -af 2>/dev/null || echo prune-skipped
+          df -h / | tail -1
+
+      - uses: actions/download-artifact@v4
+        if: ${{ github.event.inputs.bootstate_run != '' }}
+        continue-on-error: true
+        with:
+          name: golden-windows-dev-bootstate
+          path: artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.inputs.bootstate_run }}
+
+      - name: place the disk
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python3 scripts/openssh_setup.py place
+          --pull-repo easysandbox-windows-golden
+          --pull-tag ${{ github.event.inputs.pull_tag }}
+
+      - name: boot and wait for the desktop
+        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: clean-boot
+          interval: "20"
+          command: >-
+            python3 scripts/openssh_setup.py boot
+            --container cleandisk --port ${{ github.event.inputs.port }}
+            --wait ${{ github.event.inputs.boot_wait }}
+
+      - name: expose the port
+        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: clean-forward
+          interval: "15"
+          command: >-
+            python3 scripts/openssh_setup.py forward
+            --container cleandisk --port ${{ github.event.inputs.port }}
+
+      - name: clean the guest
+        if: always()
+        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: clean-guest
+          interval: "15"
+          command: >-
+            python3 scripts/openssh_setup.py clean
+            --port ${{ github.event.inputs.port }}
+            --user docker --password admin
+
+      - name: export the disk
+        if: always() && github.event.inputs.export_disk == 'yes'
+        run: >-
+          python3 scripts/openssh_setup.py export
+          --container cleandisk --out-name windows-clean.qcow2
+
+      - name: publish to ghcr
+        if: always() && github.event.inputs.export_disk == 'yes'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: >-
+          python3 scripts/openssh_setup.py publish
+          --out-name windows-clean.qcow2
+          --publish-repo ghcr.io/easydev-org/easysandbox-windows-golden
+          --publish-tag ${{ github.event.inputs.publish_tag }}
+
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event.inputs.export_disk == 'yes'
+        with:
+          name: golden-windows-clean-bootstate
+          path: out/*.bootstate.tar.gz
+          if-no-files-found: warn
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: clean-shots
+          path: shots/**
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: stop
+        if: always()
+        run: docker rm -f cleandisk || true

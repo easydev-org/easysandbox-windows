@@ -1,0 +1,100 @@
+# Clean the traces a build leaves, before the disk is exported.
+#
+# This disk is handed on as a golden image. Whatever this run put on it - installers,
+# extraction directories, a test .c file, my own helper scripts, shell history - travels
+# with it unless it is removed here, and it is visible to whoever gets the image.
+#
+# WHAT IS DELIBERATELY KEPT: the installed products themselves. Only caches, temp files,
+# logs and history go. Nothing here touches Program Files, ProgramData\Microsoft\VisualStudio\Packages
+# (the VS payload cache is what makes repair and update work), or the dotnet SDK.
+$ErrorActionPreference = 'Continue'
+
+$before = (Get-PSDrive C -ErrorAction SilentlyContinue).Used
+Write-Output ("=== clean ===")
+Write-Output ("used before: " + [math]::Round($before/1GB,2) + " GB")
+
+function Report($what, $path) {
+    if ($path -and (Test-Path $path)) {
+        $sz = (Get-ChildItem $path -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+        Write-Output ("  " + $what + ": " + [math]::Round(($sz/1MB),1) + " MB")
+    } else {
+        Write-Output ("  " + $what + ": absent")
+    }
+}
+
+# 1. My own helper scripts and the compile test.
+Write-Output "--- build artefacts ---"
+Report "msvc-check dir" (Join-Path $env:USERPROFILE "msvc-check")
+Remove-Item (Join-Path $env:USERPROFILE "msvc-check") -Recurse -Force -ErrorAction SilentlyContinue
+Get-ChildItem $env:USERPROFILE -Filter "vs-*.ps1" -ErrorAction SilentlyContinue | ForEach-Object {
+    Write-Output ("  removing " + $_.Name)
+    Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+}
+Get-ChildItem $env:USERPROFILE -Filter "msvc-check.ps1" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+
+# 2. User and system temp.
+Write-Output "--- temp ---"
+Report "user TEMP" $env:TEMP
+Get-ChildItem $env:TEMP -Force -ErrorAction SilentlyContinue | ForEach-Object {
+    Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+}
+Report "Windows Temp" (Join-Path $env:SystemRoot "Temp")
+Get-ChildItem (Join-Path $env:SystemRoot "Temp") -Force -ErrorAction SilentlyContinue | ForEach-Object {
+    Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# 3. winget download cache. The installed packages stay; only the downloaded installers go.
+Write-Output "--- winget cache ---"
+Get-ChildItem (Join-Path $env:LOCALAPPDATA "Packages") -Directory -Filter "Microsoft.DesktopAppInstaller_*" -ErrorAction SilentlyContinue | ForEach-Object {
+    foreach ($sub in @("LocalState\Temp", "LocalState\DownloadedInstallers", "LocalState\Manifests")) {
+        $p = Join-Path $_.FullName $sub
+        if (Test-Path $p) {
+            $sz = (Get-ChildItem $p -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+            Write-Output ("  " + $sub + ": " + [math]::Round(($sz/1MB),1) + " MB")
+            Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+# 4. Delivery optimisation cache - Windows Update style peer cache, often several GB.
+Write-Output "--- delivery optimisation ---"
+$do = "$env:SystemRoot\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization"
+Report "DeliveryOptimization" $do
+
+# 5. Shell history.
+Write-Output "--- history ---"
+$hist = Join-Path $env:APPDATA "Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt"
+if (Test-Path $hist) { Write-Output ("  PSReadLine history: " + (Get-Item $hist).Length + " bytes") } else { Write-Output "  PSReadLine history: absent" }
+Remove-Item $hist -Force -ErrorAction SilentlyContinue
+
+# 6. Run dialog and recent documents, which list what was executed.
+Write-Output "--- shell traces ---"
+Remove-Item "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $env:APPDATA "Microsoft\Windows\Recent\*") -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $env:APPDATA "Microsoft\Windows\Recent\AutomaticDestinations\*") -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $env:APPDATA "Microsoft\Windows\Recent\CustomDestinations\*") -Recurse -Force -ErrorAction SilentlyContinue
+Write-Output "  recent items and jump lists cleared"
+
+# 7. Recycle bin.
+Write-Output "--- recycle bin ---"
+try { Clear-RecycleBin -Force -ErrorAction Stop; Write-Output "  emptied" } catch { Write-Output ("  " + $_.Exception.Message) }
+
+# 8. Event logs. Cleared last, and each log is only cleared if it will clear - some are
+# locked while a service holds them.
+Write-Output "--- event logs ---"
+$cleared = 0
+foreach ($log in @("Application","System","Security","Setup","Windows PowerShell")) {
+    try { wevtutil cl $log 2>$null; $cleared++ } catch { }
+}
+Write-Output ("  cleared " + $cleared + " logs")
+
+# 9. The ssh known_hosts entries this pipeline wrote, and any saved credentials.
+Write-Output "--- ssh and credentials ---"
+$kh = Join-Path $env:USERPROFILE ".ssh\known_hosts"
+if (Test-Path $kh) { Remove-Item $kh -Force -ErrorAction SilentlyContinue; Write-Output "  known_hosts removed" } else { Write-Output "  known_hosts absent" }
+cmdkey /list 2>$null | Select-String "Target:" | ForEach-Object { Write-Output ("  credential: " + $_.Line) }
+
+$after = (Get-PSDrive C -ErrorAction SilentlyContinue).Used
+Write-Output ("used after:  " + [math]::Round($after/1GB,2) + " GB")
+Write-Output ("freed:        " + [math]::Round(($before - $after)/1GB,2) + " GB")
+Write-Output "CLEAN_DONE"
