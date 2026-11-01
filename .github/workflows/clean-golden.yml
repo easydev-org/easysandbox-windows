@@ -110,8 +110,11 @@ jobs:
             python3 scripts/openssh_setup.py forward
             --container cleandisk --port ${{ github.event.inputs.port }}
 
+      # Only if the guest is actually up and reachable. When boot timed out, this ran anyway
+      # and failed in four seconds with 'Connection reset by peer', which reads like a
+      # cleaning bug rather than 'there was nothing to clean'.
       - name: clean the guest
-        if: always()
+        if: success()
         uses: easydev-org/easyagent-github-ext/actions/log-stream@main
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -122,14 +125,17 @@ jobs:
             --port ${{ github.event.inputs.port }}
             --user docker --password admin
 
+      # ONLY AFTER A SUCCESSFUL CLEAN. These were if: always(), so a run whose boot timed out
+      # went on to export and publish the disk it never cleaned - and overwrote dev-latest
+      # with it. A disk that was not cleaned must not replace the published one.
       - name: export the disk
-        if: always() && github.event.inputs.export_disk == 'yes'
+        if: success() && github.event.inputs.export_disk == 'yes'
         run: >-
           python3 scripts/openssh_setup.py export
           --container cleandisk --out-name windows-clean.qcow2
 
       - name: publish to ghcr
-        if: always() && github.event.inputs.export_disk == 'yes'
+        if: success() && github.event.inputs.export_disk == 'yes'
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
@@ -140,7 +146,7 @@ jobs:
           --publish-tag ${{ github.event.inputs.publish_tag }}
 
       - uses: actions/upload-artifact@v4
-        if: always() && github.event.inputs.export_disk == 'yes'
+        if: success() && github.event.inputs.export_disk == 'yes'
         with:
           name: golden-windows-clean-bootstate
           path: out/*.bootstate.tar.gz
