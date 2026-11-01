@@ -312,6 +312,28 @@ def stage_verify(args):
     )
 
 
+def ssh_run(port, user, password, command, timeout=1800, echo=True):
+    """Run one command over ssh. A single argv entry, so nothing inside is reinterpreted.
+
+    Defined here rather than imported because openssh_setup.py drives the guest over ssh in
+    three places (clean, export, and would-be others) and sdk_install.py has its own copy for
+    the package work. Duplicating eight lines of argv beats a shared module for this.
+    """
+    return xsh.run([
+        "sshpass", "-p", password,
+        "ssh",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "ConnectTimeout=30",
+        "-o", "PreferredAuthentications=password",
+        "-o", "PubkeyAuthentication=no",
+        "-o", "ServerAliveInterval=30",
+        "-p", str(port),
+        "%s@127.0.0.1" % user,
+        command,
+    ], echo=echo, timeout=timeout)
+
+
 def stage_clean(args):
     """Remove the traces this pipeline leaves inside the guest, before the disk is exported.
 
