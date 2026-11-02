@@ -196,7 +196,7 @@ $apps = @(
     'TuneIn.TuneInRadio',
     'WinZipUniversal',
     'Wunderlist',
-    'XING.EU',
+    'XING.EU'
 )
 $removed = 0
 foreach ($n in $apps) {

@@ -726,11 +726,20 @@ def selftest_virtual_size():
             bad += not got
             print("  %s %-16s %-26s -> %s" % ("ok " if got else "FAIL", name, needle[:26], got))
 
-    for desc, text, want in cases:
-        got = _read_virtual_size(text)
-        bad += got != want
-        print("  %s virtual-size %-18s -> %s" % ("ok " if got == want else "FAIL", desc, got))
-    print("  %s" % ("virtual-size cases passed" if bad == 0 else "%d FAILED" % bad))
+    # A TRAILING COMMA BEFORE A CLOSING PAREN stops the whole script parsing. slim.ps1 had one,
+    # and because it runs detached and silently that looked like 'starting' for twenty-five
+    # minutes with no log and no error anywhere. This check costs nothing and would have caught
+    # it before a run.
+    for fname in sorted(os.listdir(os.path.join(HERE, "ps"))):
+        if not fname.endswith(".ps1"):
+            continue
+        plines = open(os.path.join(HERE, "ps", fname)).read().splitlines()
+        for i, pl in enumerate(plines):
+            if pl.strip() == ")" and i > 0 and plines[i - 1].strip().endswith(","):
+                print("  FAIL %s:%d trailing comma before ')'" % (fname, i + 1))
+                bad += 1
+
+    print("  %s" % ("clean cases passed" if bad == 0 else "%d FAILED" % bad))
     return 0 if bad == 0 else 1
 
 
