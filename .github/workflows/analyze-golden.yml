@@ -71,17 +71,20 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ github.event.inputs.bootstate_run }}
 
-      # A PLAIN RUN STEP, NOT log-stream. log-stream does not pass env: through, and
-      # place needs GHCR_TOKEN - the streamed version failed in one second with
-      # GHCR_TOKEN is not set. The output comes from the step log; the pull prints
-      # per-chunk progress now, so a failure names the layer and the byte range.
+      # STREAMED. log-stream does not forward env: to the command it runs, which is why
+      # the first attempt failed in a second with GHCR_TOKEN is not set - the token now
+      # goes on the command line as --token, and place accepts it there.
       - name: place the disk
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >-
-          python3 scripts/openssh_setup.py place
-          --pull-repo easysandbox-windows-golden
-          --pull-tag ${{ github.event.inputs.pull_tag }}
+        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: analyze-place
+          interval: "20"
+          command: >-
+            python3 scripts/openssh_setup.py place
+            --pull-repo easysandbox-windows-golden
+            --pull-tag ${{ github.event.inputs.pull_tag }}
+            --token ${{ secrets.GITHUB_TOKEN }}
 
       - name: boot and wait for the desktop
         uses: easydev-org/easyagent-github-ext/actions/log-stream@main

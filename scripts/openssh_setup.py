@@ -48,7 +48,12 @@ def stage_place(args):
     print("--- pulling ghcr.io/easydev-org/%s:%s ---" % (repo, tag), flush=True)
 
     env = dict(os.environ)
-    xsh.need(env.get("GHCR_TOKEN"), "GHCR_TOKEN is not set (needs read:packages)")
+    # --token lets a caller pass it on the command line. log-stream does not forward env: to
+    # the command it runs, so a streamed place step had no credentials and failed in a second
+    # with 'GHCR_TOKEN is not set'.
+    token = getattr(args, "token", None) or env.get("GHCR_TOKEN")
+    xsh.need(token, "GHCR_TOKEN is not set (needs read:packages)")
+    env["GHCR_TOKEN"] = token
     local = "pulled.qcow2"
     r = xsh.run([sys.executable,
                  os.path.join(os.path.dirname(os.path.abspath(__file__)), "ghcr_pull_disk.py"),
@@ -734,6 +739,9 @@ def main(argv=None):
                     help="export/publish: filename of the qcow2 in out/")
     ap.add_argument("--publish-repo", default="ghcr.io/easydev-org/easysandbox-windows-golden")
     ap.add_argument("--publish-tag", default="base")
+    ap.add_argument("--token", default=None,
+                    help="registry token; defaults to $GHCR_TOKEN. Needed because "
+                         "log-stream does not forward env: to the command it runs")
     ap.add_argument("--pull-repo", default="easysandbox-windows-golden")
     ap.add_argument("--pull-tag", default="base")
     ap.add_argument("--stamp", default="",
