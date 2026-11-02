@@ -81,13 +81,20 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ github.event.inputs.bootstate_run }}
 
+      # STREAMED with --token. log-stream does not forward env: to the command it runs, so
+      # the token goes on the command line; place accepts it there. Without streaming, a
+      # failure here leaves no readable log at all.
       - name: place the disk
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >-
-          python3 scripts/openssh_setup.py place
-          --pull-repo easysandbox-windows-golden
-          --pull-tag ${{ github.event.inputs.pull_tag }}
+        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: clean-golden-place
+          interval: "20"
+          command: >-
+            python3 scripts/openssh_setup.py place
+            --pull-repo easysandbox-windows-golden
+            --pull-tag ${{ github.event.inputs.pull_tag }}
+            --token ${{ secrets.GITHUB_TOKEN }}
 
       - name: boot and wait for the desktop
         uses: easydev-org/easyagent-github-ext/actions/log-stream@main
