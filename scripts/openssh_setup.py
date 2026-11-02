@@ -379,22 +379,58 @@ def stage_clean(args):
     # DO NOT TAKE SILENCE FOR SUCCESS. The script ends with CLEAN_DONE; without that marker
     # the step failed and the disk still carries whatever was left.
     xsh.need("CLEAN_DONE" in out, "clean.ps1 did not report completion")
-    # NO FREE-SPACE ZERO FILL, and the reason is worth recording because it went the wrong way.
+    # SLIM THE IMAGE: remove components Windows does not need and compact the store.
     #
-    # The theory was that qemu-img convert stores clusters whose bytes are not zero, so the
-    # clusters holding a deleted file would still be stored. On a qcow2-backed disk that is
-    # backwards: clusters that were never written are unallocated, and convert skips them
-    # without reading anything. Writing 35 GB of zeros allocates 35 GB of clusters that now
-    # have to be recorded and then stored. The measurement was unambiguous -
+    # Detached and polled, for the same reason the download is chunked and the bootstrapper
+    # was detached - StartComponentCleanup /ResetBase takes ten to twenty minutes, and no
+    # single ssh call survives that. Progress is written to C:\slim.log and the marker
+    # C:\slim.done appears when it is finished.
     #
-    #   before the fill   21.54 GiB
-    #   after the fill    22.77 GiB
-    #
-    # and the fill never even completed, so the smaller growth is not the whole cost.
-    #
-    # What does show up in the image is the cleaning: it removed 1443 MB from the guest, and
-    # export re-runs qemu-img convert over the result, so those clusters are simply not there
-    # any more. That is the measurement this run is for.
+    # Nothing here deletes the toolchain. The list is Windows components and the appx
+    # packages that ship with the OS; Edge and WebView are left alone, as asked.
+    for name in ("slim.ps1", "slim-start.ps1", "slim-status.ps1", "slim-log.ps1"):
+        lp = os.path.join(HERE, "ps", name)
+        rp = "C:/Users/%s/%s" % (args.user, name)
+        r = xsh.run(["sshpass", "-p", args.password, "scp",
+                     "-o", "StrictHostKeyChecking=no",
+                     "-o", "UserKnownHostsFile=/dev/null",
+                     "-P", str(args.port), lp, "%s@127.0.0.1:%s" % (args.user, rp)],
+                    echo=False, timeout=300)
+        xsh.need(r.ok, "could not copy %s: %s" % (name, r.err or r.out))
+
+    ssh_run(args.port, args.user, args.password,
+            "powershell -NoProfile -ExecutionPolicy Bypass -File "
+            "C:/Users/%s/slim-start.ps1" % args.user, timeout=120)
+    print("=== slimming (detached) ===", flush=True)
+
+    deadline = time.time() + 3600
+    last = ""
+    finished = False
+    while time.time() < deadline:
+        time.sleep(30)
+        r = ssh_run(args.port, args.user, args.password,
+                    "powershell -NoProfile -ExecutionPolicy Bypass -File "
+                    "C:/Users/%s/slim-status.ps1" % args.user, timeout=180)
+        out = ((r.out or "") + (r.err or "")).strip().splitlines()
+        line = out[-1].strip() if out else ""
+        if line and line != last:
+            print("  " + line[:130], flush=True)
+            last = line
+        if "SLIM_DONE" in out:
+            finished = True
+            break
+    if not finished:
+        print("  slimming did not finish within the hour; exporting anyway", flush=True)
+    else:
+        # The whole log is worth having when it worked, not just the last line.
+        r = ssh_run(args.port, args.user, args.password,
+                    "powershell -NoProfile -ExecutionPolicy Bypass "
+                    "-File C:/Users/%s/slim-log.ps1" % args.user, timeout=180)
+        for line in ((r.out or "") + (r.err or "")).strip().splitlines():
+            t = line.strip()
+            if t and not t.startswith("Warning: Permanently added"):
+                print("  " + t[:150], flush=True)
+
     print("=== cleaned; verifying the image size ===", flush=True)
     return 0
 
@@ -661,6 +697,27 @@ def selftest_virtual_size():
         ("absent", "no size here", None),
     ]
     bad = 0
+
+    # The slim run is its own detached script; check the things whose absence would make it
+    # silently do nothing, and that Edge is not in it.
+    for name, needles in [
+        ("slim.ps1", ["SLIM_DONE", "StartComponentCleanup", "ResetBase",
+                       "Remove-WindowsCapability", "Remove-AppxProvisionedPackage"]),
+        ("slim-start.ps1", ["Start-Process", "slim.ps1"]),
+        ("slim-status.ps1", ["slim.done", "slim.log"]),
+        ("slim-log.ps1", ["slim.log"]),
+    ]:
+        p = os.path.join(HERE, "ps", name)
+        if not os.path.exists(p):
+            print("  FAIL %s missing" % name)
+            bad += 1
+            continue
+        body = open(p).read()
+        for needle in needles:
+            got = needle in body
+            bad += not got
+            print("  %s %-16s %-26s -> %s" % ("ok " if got else "FAIL", name, needle[:26], got))
+
     for desc, text, want in cases:
         got = _read_virtual_size(text)
         bad += got != want
