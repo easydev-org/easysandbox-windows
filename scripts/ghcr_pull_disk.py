@@ -57,12 +57,17 @@ def token(repo, pat):
     return json.load(r)["token"]
 
 
-def get(url, tok, accept=None):
+def get(url, tok, accept=None, start=None):
     h = {"Authorization": "Bearer " + tok}
     if accept:
         h["Accept"] = accept
+    if start is not None:
+        h["Range"] = "bytes=%d-" % start
+    # 120 was too short for a slow layer: the read times out part way and the retry starts
+    # over from zero, so a 1 GiB layer over a slow link never finishes. 600 is a read timeout,
+    # not a total one - it only fires when the stream goes quiet for ten minutes.
     return urllib.request.urlopen(urllib.request.Request(url, headers=h),
-                                  timeout=120, context=ctx)
+                                  timeout=600, context=ctx)
 
 
 def main():
@@ -109,12 +114,19 @@ def main():
             # go through a proxy to a CDN and neither promises the whole body first time.
             data = None
             last = None
-            for attempt in range(1, 5):
-                fd, bpath = tempfile.mkstemp(suffix=".blob")
-                os.close(fd)
+            for attempt in range(1, 9):
+                # THE SAME FILE ACROSS ATTEMPTS, and the retry asks for the bytes it does not
+                # have. Starting over from zero each time is what made a slow 1 GiB layer
+                # impossible: 78 seconds of transfer, a dropped connection, and the next
+                # attempt beginning again at byte 0. Eight attempts at 78 seconds each is
+                # what the 312- and 388-second failures in the log were.
+                if attempt == 1:
+                    fd, bpath = tempfile.mkstemp(suffix=".blob")
+                    os.close(fd)
+                have = os.path.getsize(bpath) if os.path.exists(bpath) else 0
                 try:
                     url = "https://%s/v2/%s/%s/blobs/%s" % (REG, OWNER, repo, dg)
-                    with get(url, tok) as r, open(bpath, "wb") as bf:
+                    with get(url, tok, start=have if have else None) as r, open(bpath, "ab") as bf:
                         while True:
                             chunk = r.read(1 << 20)
                             if not chunk:
@@ -131,17 +143,21 @@ def main():
                     break
                 except Exception as exc:
                     last = exc
-                    print("        attempt %d failed: %s; retrying" % (attempt, str(exc)[:80]), flush=True)
-                    if attempt >= 4:
-                        sys.exit("layer %d could not be downloaded after 4 attempts: %s" % (i + 1, last))
-                    time.sleep(5 * attempt)
-                finally:
-                    try:
-                        os.unlink(bpath)
-                    except OSError:
-                        pass
+                    kept = os.path.getsize(bpath) if os.path.exists(bpath) else 0
+                    print("        attempt %d stopped at %.1f of %.1f MB: %s" %
+                          (attempt, kept / 2**20, sz / 2**20, str(exc)[:70]), flush=True)
+                    if attempt >= 8:
+                        sys.exit("layer %d could not be downloaded after 8 attempts: %s"
+                                 % (i + 1, last))
+                    time.sleep(3 * attempt)
             fh.write(data)
             print("        -> %.1f MB extracted" % (len(data) / 1024 ** 2), flush=True)
+            # The blob is no longer needed once extracted, and it is up to 1 GiB. It survived
+            # the retries deliberately; it must not survive success.
+            try:
+                os.unlink(bpath)
+            except OSError:
+                pass
 
     if want:
         got = subprocess.run(["sha256sum", tmp], capture_output=True, text=True).stdout.split()[0]
