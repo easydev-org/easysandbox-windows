@@ -1,23 +1,37 @@
-# State of the slim run, including whether the scheduled task exists at all.
-#
-# starting for twenty minutes was indistinguishable from never started, and it was the
-# latter: the Start-Process child was killed with the ssh session. Reporting the task state
-# and its last result makes that visible next time.
+# State of the slim run, with enough detail to tell the three cases apart:
+#   never started   no scheduled task
+#   died at once    task Ready, rc != 0, and slim.out says why
+#   running         task Running, or a log with content
 $log  = Join-Path $env:SystemDrive 'slim.log'
 $done = Join-Path $env:SystemDrive 'slim.done'
+$out  = Join-Path $env:SystemDrive 'slim.out'
 $task = Get-ScheduledTask -TaskName 'slim-golden' -ErrorAction SilentlyContinue
-$note = ''
+
+if (Test-Path $done) {
+    Write-Output 'SLIM_DONE'
+    exit 0
+}
+
 if ($task) {
     $ti = Get-ScheduledTaskInfo -TaskName 'slim-golden' -ErrorAction SilentlyContinue
-    $note = '  [task=' + $task.State + ' rc=' + $ti.LastTaskResult + ']'
+    Write-Output ('  task=' + $task.State + ' rc=' + $ti.LastTaskResult)
 } else {
-    $note = '  [no scheduled task]'
+    Write-Output '  no scheduled task'
 }
-if (Test-Path $done) {
-    Write-Output ('SLIM_DONE' + $note)
-} elseif (Test-Path $log) {
-    $last = Get-Content $log -Tail 1 -ErrorAction SilentlyContinue
-    Write-Output (($last) + $note)
+
+if (Test-Path $log) {
+    Write-Output '  log: '
+    Get-Content $log -Tail 3 -ErrorAction SilentlyContinue | ForEach-Object { Write-Output ('    ' + $_) }
 } else {
-    Write-Output ('starting (no log yet)' + $note)
+    Write-Output '  no slim.log yet'
+}
+
+# slim.out holds the powershell stream. When the task returns rc=1 and the log is empty,
+# this is the only place the reason appears.
+if (Test-Path $out) {
+    $err = Get-Content $out -Tail 6 -ErrorAction SilentlyContinue
+    if ($err) {
+        Write-Output '  slim.out: '
+        $err | ForEach-Object { Write-Output ('    ' + $_) }
+    }
 }

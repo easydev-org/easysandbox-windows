@@ -23,9 +23,15 @@
 # single ssh call survives that. Progress goes to a marker file.
 $ErrorActionPreference = 'SilentlyContinue'
 
+
 $log = Join-Path $env:SystemDrive 'slim.log'
 $done = Join-Path $env:SystemDrive 'slim.done'
 Remove-Item $log, $done -Force -ErrorAction SilentlyContinue
+
+# FIRST LINE OF EVIDENCE, written after the old logs are cleared so it is not immediately
+# deleted. rc=1 with no log at all means powershell never ran this file; a log holding only
+# this line means it started and something later broke.
+Set-Content -Path $log -Value (('started ' + (Get-Date).ToString('HH:mm:ss') + ' as ' + $env:USERNAME)) -ErrorAction SilentlyContinue
 
 function Say($m) {
     Add-Content -Path $log -Value $m
