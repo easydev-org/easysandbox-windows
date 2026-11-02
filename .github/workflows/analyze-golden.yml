@@ -19,7 +19,10 @@ on:
       bootstate_run:
         description: Run id holding the bootstate artifact for that disk
         required: false
-        default: ''
+      bootstate_name:
+        description: bootstate artifact name for that disk
+        required: false
+        default: golden-windows-openssh-bootstate
       port:
         description: sshd port
         required: false
@@ -65,7 +68,7 @@ jobs:
         if: ${{ github.event.inputs.bootstate_run != '' }}
         continue-on-error: true
         with:
-          name: golden-windows-dev-bootstate
+          name: ${{ github.event.inputs.bootstate_name }}
           path: artifact
           github-token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
