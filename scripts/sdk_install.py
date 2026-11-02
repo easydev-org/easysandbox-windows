@@ -55,12 +55,26 @@ PACKAGES = [
     # winget DOES carry 17.14.44, whose manifest has no such OS cap. Pinning the version and
     # the workload together is one mechanism instead of two, and winget does the download
     # and the elevation itself.
+    # MINIMAL MSVC, not the whole VCTools workload.
+    #
+    # --includeRecommended pulls in CMake, ATL/MFC, the test platform and a spread of other
+    # components that a machine which only needs cl.exe never runs. The workload is a set of
+    # components with recommendations attached; naming the components directly gets the
+    # compiler and the things cl needs to link, and nothing else.
+    #
+    #   VC.Tools.x86.x64     cl.exe, link.exe, the libraries and headers
+    #   VC.Redist.14.Latest  the redistributable runtime the compiled binaries link against
+    #
+    # The Windows SDK is NOT added here - it is installed separately as its own winget
+    # package below, and using the standalone package rather than the component inside
+    # BuildTools avoids the two copies that were both landing in C:\Program Files (x86).
     ("Microsoft.VisualStudio.2022.BuildTools",
      "17.14.44",
      ["--override",
       "--quiet --wait --norestart "
-      "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"],
-     "MSVC, the Windows SDK and CMake, from a version whose manifest knows this OS"),
+      "--add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 "
+      "--add Microsoft.VisualStudio.Component.VC.Redist.14.Latest"],
+     "MSVC compiler only - no recommended extras, and no second copy of the SDK"),
     ("Microsoft.WindowsSDK.10.0.26100", None, None, "the SDK on its own"),
     ("Microsoft.DotNet.SDK.10", None, None, "the .NET SDK, which VCTools does not include"),
     ("Microsoft.PowerShell", None, None,
