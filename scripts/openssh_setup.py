@@ -47,13 +47,16 @@ def stage_place(args):
     tag = args.pull_tag or "base"
     print("--- pulling ghcr.io/easydev-org/%s:%s ---" % (repo, tag), flush=True)
 
-    env = dict(os.environ)
     # --token lets a caller pass it on the command line. log-stream does not forward env: to
     # the command it runs, so a streamed place step had no credentials and failed in a second
     # with 'GHCR_TOKEN is not set'.
-    token = getattr(args, "token", None) or env.get("GHCR_TOKEN")
+    #
+    # It is set in os.environ rather than in a dict for the child, because xsh.run has no env
+    # parameter - ghcr_pull_disk.py reads GHCR_TOKEN from the environment, and that is the
+    # environment it will get.
+    token = getattr(args, "token", None) or os.environ.get("GHCR_TOKEN")
     xsh.need(token, "GHCR_TOKEN is not set (needs read:packages)")
-    env["GHCR_TOKEN"] = token
+    os.environ["GHCR_TOKEN"] = token
     local = "pulled.qcow2"
     r = xsh.run([sys.executable,
                  os.path.join(os.path.dirname(os.path.abspath(__file__)), "ghcr_pull_disk.py"),
