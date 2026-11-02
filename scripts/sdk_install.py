@@ -365,13 +365,17 @@ def selftest():
     # source it would be eaten on the way into the file too.
     bslash = chr(92)
     for name, needles in [
+        # msvc-check.ps1 is the one that matters: it asks vswhere for the VC.Tools component by
+        # name, compiles hello.c through vcvars64.bat and runs the binary. A component set that
+        # installs but cannot compile fails here, which is the only outcome worth calling
+        # success.
+        #
+        # The vs-*.ps1 assertions are gone with those files. They belonged to the evergreen
+        # bootstrapper approach, which was replaced by pinning winget to 17.14.44 - the
+        # bootstrapper downloaded and unpacked and left an empty extraction directory, and
+        # the pinned package simply worked.
         ("msvc-check.ps1", ["Installer" + bslash + "vswhere.exe",
                             "Build" + bslash + "vcvars64.bat", "hello-from-msvc"]),
-        ("vs-start.ps1", ["aka.ms/vs/17/release/vs_BuildTools.exe",
-                          "Start-Process", "Workload.VCTools",
-                          "Set-MpPreference", "DisableRealtimeMonitoring"]),
-        ("vs-status.ps1", ["Installer" + bslash + "vswhere.exe",
-                           "INSTALL_RUNNING", "VCTOOLS_PRESENT", "free on C:"]),
     ]:
         path = os.path.join(HERE, "ps", name)
         if not os.path.exists(path):
