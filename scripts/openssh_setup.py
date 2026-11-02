@@ -395,7 +395,7 @@ def stage_clean(args):
     #
     # Nothing here deletes the toolchain. The list is Windows components and the appx
     # packages that ship with the OS; Edge and WebView are left alone, as asked.
-    for name in ("slim.ps1", "slim-start.ps1", "slim-status.ps1", "slim-log.ps1"):
+    for name in ("slim.ps1", "slim-start.ps1", "slim-status.ps1", "slim-log.ps1", "slim-run.ps1"):
         lp = os.path.join(HERE, "ps", name)
         rp = "C:/Users/%s/%s" % (args.user, name)
         r = xsh.run(["sshpass", "-p", args.password, "scp",
@@ -710,9 +710,10 @@ def selftest_virtual_size():
     for name, needles in [
         ("slim.ps1", ["SLIM_DONE", "StartComponentCleanup", "ResetBase",
                        "Remove-WindowsCapability", "Remove-AppxProvisionedPackage"]),
-        ("slim-start.ps1", ["Start-Process", "slim.ps1"]),
+        ("slim-start.ps1", ["slim-run.ps1"]),
         ("slim-status.ps1", ["slim.done", "slim.log"]),
         ("slim-log.ps1", ["slim.log"]),
+        ("slim-run.ps1", ["slim.ps1", "slim.out"]),
     ]:
         p = os.path.join(HERE, "ps", name)
         if not os.path.exists(p):
