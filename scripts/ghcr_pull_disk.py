@@ -145,7 +145,7 @@ def main():
                 pos = 0
                 while pos < sz:
                     endb = min(pos + CHUNK, sz) - 1
-                    want = endb - pos + 1
+                    nbytes = endb - pos + 1
                     ok = False
                     err = None
                     for attempt in range(1, 7):
@@ -153,9 +153,9 @@ def main():
                             url = "https://%s/v2/%s/%s/blobs/%s" % (REG, OWNER, repo, dg)
                             r = get_range(url, tok, pos, endb)
                             body = r.read()
-                            if len(body) != want:
+                            if len(body) != nbytes:
                                 raise IOError("chunk %d-%d returned %d of %d bytes"
-                                              % (pos, endb, len(body), want))
+                                              % (pos, endb, len(body), nbytes))
                             with open(bpath, "r+b" if pos else "wb") as bf:
                                 bf.seek(pos)
                                 bf.write(body)
@@ -187,6 +187,13 @@ def main():
                     os.unlink(bpath)
                 except OSError:
                     pass
+            # THE LAYER HAS TO REACH THE OUTPUT FILE. This line went missing when the download
+            # loop was rewritten: every layer was fetched and unpacked and then dropped, so the
+            # .part file stayed zero bytes and sha256sum reported e3b0c442... - the hash of an
+            # empty file - against a 'want' that the chunk loop had overwritten with its own
+            # byte count.
+            fh.write(data)
+            fh.flush()
             print("        -> %.1f MB extracted" % (len(data) / 1024 ** 2), flush=True)
 
     if want:
