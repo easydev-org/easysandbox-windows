@@ -71,13 +71,20 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ github.event.inputs.bootstate_run }}
 
+      # STREAMED, not a plain run step. A plain step buffers its output until it finishes, so
+      # when place failed after five minutes the download log was invisible - which is what
+      # happened three times while chasing this. log-stream shows it live and keeps it.
       - name: place the disk
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >-
-          python3 scripts/openssh_setup.py place
-          --pull-repo easysandbox-windows-golden
-          --pull-tag ${{ github.event.inputs.pull_tag }}
+        uses: easydev-org/easyagent-github-ext/actions/log-stream@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: analyze-place
+          interval: "20"
+          env: "GHCR_TOKEN=${{ secrets.GITHUB_TOKEN }}"
+          command: >-
+            python3 scripts/openssh_setup.py place
+            --pull-repo easysandbox-windows-golden
+            --pull-tag ${{ github.event.inputs.pull_tag }}
 
       - name: boot and wait for the desktop
         uses: easydev-org/easyagent-github-ext/actions/log-stream@main

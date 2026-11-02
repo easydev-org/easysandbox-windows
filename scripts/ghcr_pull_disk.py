@@ -57,6 +57,22 @@ def token(repo, pat):
     return json.load(r)["token"]
 
 
+def get_range(url, tok, start, end):
+    """One byte range of a blob, with the code checked.
+
+    A server that does not honour Range answers 200 with the whole blob. Concatenating that
+    onto a partial file gives something longer than the layer, which unpacks to garbage at
+    the end - so 206 is required, not assumed.
+    """
+    h = {"Authorization": "Bearer " + tok, "Range": "bytes=%d-%d" % (start, end)}
+    r = urllib.request.urlopen(urllib.request.Request(url, headers=h),
+                               timeout=300, context=ctx)
+    if r.status != 206:
+        r.close()
+        raise IOError("range not honoured: HTTP %d for bytes %d-%d" % (r.status, start, end))
+    return r
+
+
 def get(url, tok, accept=None, start=None):
     h = {"Authorization": "Bearer " + tok}
     if accept:
@@ -108,56 +124,70 @@ def main():
             sz = l["size"]
             print(f"  layer {i + 1}/{len(layers)}  {sz / 1024 ** 2:8.1f} MB  {dg[:22]}", flush=True)
 
-            # RETRIED. A layer is up to 1 GiB and the connection can end part-way through:
-            # one run failed with tarfile.ReadError: unexpected end of data after 400
-            # seconds of downloading. That is a truncated blob, not a bad manifest. Runners
-            # go through a proxy to a CDN and neither promises the whole body first time.
             data = None
-            last = None
-            for attempt in range(1, 9):
-                # THE SAME FILE ACROSS ATTEMPTS, and the retry asks for the bytes it does not
-                # have. Starting over from zero each time is what made a slow 1 GiB layer
-                # impossible: 78 seconds of transfer, a dropped connection, and the next
-                # attempt beginning again at byte 0. Eight attempts at 78 seconds each is
-                # what the 312- and 388-second failures in the log were.
-                if attempt == 1:
-                    fd, bpath = tempfile.mkstemp(suffix=".blob")
-                    os.close(fd)
-                have = os.path.getsize(bpath) if os.path.exists(bpath) else 0
-                try:
-                    url = "https://%s/v2/%s/%s/blobs/%s" % (REG, OWNER, repo, dg)
-                    with get(url, tok, start=have if have else None) as r, open(bpath, "ab") as bf:
-                        while True:
-                            chunk = r.read(1 << 20)
-                            if not chunk:
-                                break
-                            bf.write(chunk)
-                    got = os.path.getsize(bpath)
-                    if got != sz:
-                        raise IOError("short layer: %d of %d bytes" % (got, sz))
-                    with tarfile.open(bpath, "r:*") as tf:
-                        parts = [m for m in tf.getmembers() if m.isfile()]
-                        if not parts:
-                            raise IOError("layer %d contains no file" % i)
-                        data = tf.extractfile(parts[0]).read()
-                    break
-                except Exception as exc:
-                    last = exc
-                    kept = os.path.getsize(bpath) if os.path.exists(bpath) else 0
-                    print("        attempt %d stopped at %.1f of %.1f MB: %s" %
-                          (attempt, kept / 2**20, sz / 2**20, str(exc)[:70]), flush=True)
-                    if attempt >= 8:
-                        sys.exit("layer %d could not be downloaded after 8 attempts: %s"
-                                 % (i + 1, last))
-                    time.sleep(3 * attempt)
-            fh.write(data)
-            print("        -> %.1f MB extracted" % (len(data) / 1024 ** 2), flush=True)
-            # The blob is no longer needed once extracted, and it is up to 1 GiB. It survived
-            # the retries deliberately; it must not survive success.
+            #
+            # Three attempts have now failed here, and the pattern was always the same: the
+            # transfer stops part way and the retry begins again at byte 0, so a slow layer
+            # can never finish (312s / 4 attempts = 78s each). Resuming a single long request
+            # is not enough either - the connection dies at whatever point the CDN or the
+            # proxy decides, and one request per layer leaves no way to make progress in
+            # between.
+            #
+            # So the layer is fetched in fixed-size ranges. Each request is short, each is
+            # retried on its own, and a layer that is failing slowly still advances. The
+            # response code is checked: a server that ignores Range answers 200 with the whole
+            # body, and appending that to a partial file would give a blob longer than the
+            # layer and silently truncate when unpacked.
+            CHUNK = 32 * 1024 * 1024
+            fd, bpath = tempfile.mkstemp(suffix=".blob")
+            os.close(fd)
             try:
-                os.unlink(bpath)
-            except OSError:
-                pass
+                pos = 0
+                while pos < sz:
+                    endb = min(pos + CHUNK, sz) - 1
+                    want = endb - pos + 1
+                    ok = False
+                    err = None
+                    for attempt in range(1, 7):
+                        try:
+                            url = "https://%s/v2/%s/%s/blobs/%s" % (REG, OWNER, repo, dg)
+                            r = get_range(url, tok, pos, endb)
+                            body = r.read()
+                            if len(body) != want:
+                                raise IOError("chunk %d-%d returned %d of %d bytes"
+                                              % (pos, endb, len(body), want))
+                            with open(bpath, "r+b" if pos else "wb") as bf:
+                                bf.seek(pos)
+                                bf.write(body)
+                            ok = True
+                            break
+                        except Exception as exc:
+                            err = exc
+                            print("          chunk at %.0f MB attempt %d: %s" %
+                                  (pos / 2**20, attempt, str(exc)[:60]), flush=True)
+                            time.sleep(2 * attempt)
+                    if not ok:
+                        sys.exit("layer %d stuck at %.1f of %.1f MB: %s"
+                                 % (i + 1, pos / 2**20, sz / 2**20, str(err)[:80]))
+                    pos = endb + 1
+                    if (pos // CHUNK) % 8 == 0 or pos == sz:
+                        print("        %.0f / %.0f MB" % (pos / 2**20, sz / 2**20), flush=True)
+                got = os.path.getsize(bpath)
+                if got != sz:
+                    raise IOError("short layer: %d of %d bytes" % (got, sz))
+                with tarfile.open(bpath, "r:*") as tf:
+                    parts = [m for m in tf.getmembers() if m.isfile()]
+                    if not parts:
+                        raise IOError("layer %d contains no file" % i)
+                    data = tf.extractfile(parts[0]).read()
+                if data is None:
+                    raise IOError("layer %d unpacked to nothing" % i)
+            finally:
+                try:
+                    os.unlink(bpath)
+                except OSError:
+                    pass
+            print("        -> %.1f MB extracted" % (len(data) / 1024 ** 2), flush=True)
 
     if want:
         got = subprocess.run(["sha256sum", tmp], capture_output=True, text=True).stdout.split()[0]
