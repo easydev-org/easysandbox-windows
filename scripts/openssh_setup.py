@@ -470,10 +470,19 @@ def stage_analyze(args):
         "C:/Program Files/dotnet",
         "C:/ProgramData/Microsoft/Visual Studio/Packages",
         "C:/ProgramData/Package Cache",
-        "C:/Windows/WinSxS",
         "C:/Windows/Installer",
         "C:/Windows/SoftwareDistribution",
         "C:/Windows/Temp",
+        "C:/Windows/System32/DriverStore",
+        "C:/Windows/assembly",
+        "C:/Windows/SysWOW64",
+        "C:/Windows/System32",
+        "C:/Windows/Fonts",
+        "C:/Windows/Servicing",
+        "C:/Windows/Logs",
+        "C:/ProgramData/Microsoft/Windows Defender",
+        "C:/ProgramData/Microsoft/Windows/WER",
+        "C:/ProgramData/Package Cache",
     ]:
         print("  %-48s %s" % (path, du(path)), flush=True)
 
