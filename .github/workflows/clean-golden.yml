@@ -70,10 +70,15 @@ jobs:
 
       - name: free disk space
         run: |
+          # A 64 GiB raw image is written next to the workspace, so this needs far more than
+          # the default runner leaves. Reclaim everything reclaimable before measuring.
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
                       /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" /opt/hostedtoolcache/CodeQL || true
+          sudo apt-get clean || true
           timeout 120 sudo docker image prune -af 2>/dev/null || echo prune-skipped
-          df -h / | tail -1
+          timeout 120 sudo docker container prune -f 2>/dev/null || true
+          # The partition place actually writes to, not just the root one.
+          df -h . / 2>/dev/null | sort -u
 
       - uses: actions/download-artifact@v4
         if: ${{ github.event.inputs.bootstate_run != '' }}

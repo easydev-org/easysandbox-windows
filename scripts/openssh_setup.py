@@ -71,8 +71,15 @@ def stage_place(args):
     # file itself, which would make the check compare a file with itself and pass for no
     # reason.
     expect = virtual_size(local)
-    free_kb = int(xsh.run(["df", "--output=avail", "-k", "."], echo=False).out.split()[-1])
-    xsh.need(free_kb > 64 * 1024 * 1024, "not enough free space for the raw image")
+    dfout = xsh.run(["df", "--output=avail,size,target", "-k", "."], echo=False).out or ""
+    print("  df: %s" % " / ".join(dfout.split()), flush=True)
+    free_kb = int(dfout.split()[-3])
+    need_kb = 64 * 1024 * 1024
+    # SAY WHAT IT FOUND. 'not enough free space' with no numbers cost a run: the figure was
+    # never printed, so there was no way to tell a full disk from a partition of the wrong size.
+    xsh.need(free_kb > need_kb,
+             "not enough free space for the raw image: %d MB free, %d MB needed (on %s)"
+             % (free_kb // 1024, need_kb // 1024, dfout.split()[-1]))
     xsh.run(["qemu-img", "convert", "-O", "raw", local, "storage/data.img"], check=True)
     os.unlink(local)
     size = os.path.getsize("storage/data.img")
